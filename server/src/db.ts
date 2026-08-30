@@ -90,11 +90,32 @@ export function getDb(): Database.Database {
   return db;
 }
 
+/**
+ * Everything a source told us about a title, kept so browsing the same page
+ * twice does not re-fetch it. `kind` separates the title record from its
+ * chapter index, which goes stale much faster.
+ */
+const CACHE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS source_cache (
+  id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (id, kind)
+);
+`;
+
 function migrate(db: Database.Database): void {
   const version = db.pragma('user_version', { simple: true }) as number;
   if (version < 1) {
     db.exec(SCHEMA);
     db.pragma('user_version = 1');
+  }
+  // A new table in SCHEMA alone would never reach an existing database, since
+  // that block only runs once.
+  if (version < 2) {
+    db.exec(CACHE_SCHEMA);
+    db.pragma('user_version = 2');
   }
 }
 

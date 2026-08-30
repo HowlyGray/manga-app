@@ -7,6 +7,12 @@ import * as lib from './library';
 import { downloadChapter } from '../downloader';
 import { languageRanker } from './lang';
 import {
+  cachedChapters,
+  cachedTitle,
+  rememberChapters,
+  rememberTitle,
+} from './sourceCache';
+import {
   decodeId,
   encodeId,
   getProvider,
@@ -50,7 +56,11 @@ export async function homeShelves(
     source: provider.id,
     shelves: shelves.map((shelf) => ({
       ...shelf,
-      titles: shelf.titles.map((t) => ({ ...t, libraryId: encodeId(provider.id, t.id) })),
+      titles: shelf.titles.map((t) => {
+        const libraryId = encodeId(provider.id, t.id);
+        rememberTitle(libraryId, t);
+        return { ...t, libraryId };
+      }),
     })),
   };
 }
@@ -62,7 +72,13 @@ export async function discover(params: DiscoverParams): Promise<DiscoverResult> 
     total,
     source: provider.id,
     maxOffset: provider.maxOffset,
-    titles: titles.map((t) => ({ ...t, libraryId: encodeId(provider.id, t.id) })),
+    titles: titles.map((t) => {
+      const libraryId = encodeId(provider.id, t.id);
+      // Recording it here is what lets /api/cover serve the tile later without
+      // going back upstream for the URL.
+      rememberTitle(libraryId, t);
+      return { ...t, libraryId };
+    }),
   };
 }
 
@@ -124,13 +140,28 @@ function languagesOf(chapters: SourceChapter[]): string[] {
  * Fetches a title's metadata and chapter index straight from its source,
  * without touching the local library. Used to browse titles not saved yet.
  */
-export async function remoteTitleDetail(libraryId: string): Promise<RemoteTitleDetail> {
+export async function remoteTitleDetail(
+  libraryId: string,
+  opts: { refresh?: boolean } = {},
+): Promise<RemoteTitleDetail> {
   const { provider: source, providerId } = decodeId(libraryId);
   const provider = getProvider(source);
+  const fresh = opts.refresh === true;
 
-  const t = await provider.getTitle(providerId);
+  // Metadata is stable and chapter indexes are not, so they expire separately;
+  // a title read twice in a session costs no upstream traffic at all.
+  let t = fresh ? null : cachedTitle(libraryId);
+  if (!t) {
+    t = await provider.getTitle(providerId);
+    if (t) rememberTitle(libraryId, t);
+  }
   if (!t) throw new Error(`title not found on ${provider.label}`);
-  const chapters = await provider.listChapters(providerId);
+
+  let chapters = fresh ? null : cachedChapters(libraryId);
+  if (!chapters) {
+    chapters = await provider.listChapters(providerId);
+    rememberChapters(libraryId, chapters);
+  }
 
   return {
     id: libraryId,
@@ -178,10 +209,11 @@ export async function importTitle(libraryId: string): Promise<ImportResult> {
   const { provider: source, providerId } = decodeId(libraryId);
   const provider = getProvider(source);
 
-  const t = await provider.getTitle(providerId);
+  const t = (await provider.getTitle(providerId)) ?? cachedTitle(libraryId);
   if (!t) throw new Error(`${providerId} not found on ${provider.label}`);
 
   const id = encodeId(provider.id, providerId);
+  rememberTitle(id, t);
   const coverLocal = t.coverUrl ? await downloadCover(id, t.coverUrl) : null;
 
   lib.upsertTitle({

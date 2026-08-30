@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { coverDir, config } from '../config';
@@ -8,6 +8,7 @@ import * as imgtranslator from '../services/imgtranslate';
 import { isLlmConfigured } from '../services/translator';
 import { langSpec } from '../services/lang';
 import { hasProvider, listProviders } from '../sources';
+import { coverFile } from '../services/sourceCache';
 import { downloadChapter } from '../downloader';
 import { getChapterTranslateStatus, startChapterTranslate } from '../services/chapterTranslate';
 
@@ -93,7 +94,7 @@ apiRouter.get('/home', async (req, res) => {
           year: t.year,
           status: t.status,
           tags: t.tags.slice(0, 6),
-          coverUrl: t.coverUrl,
+          coverUrl: `/api/cover/${encodeURIComponent(t.libraryId)}`,
           isSaved: lib.getTitle(t.libraryId) != null,
         })),
       })),
@@ -163,7 +164,8 @@ apiRouter.get('/discover', async (req, res) => {
       year: t.year,
       status: t.status,
       tags: t.tags.slice(0, 6),
-      coverUrl: t.coverUrl,
+      // Point at our own cache rather than the upstream CDN.
+      coverUrl: `/api/cover/${encodeURIComponent(t.libraryId)}`,
       isSaved: lib.getTitle(t.libraryId) != null,
     })),
   });
@@ -180,10 +182,12 @@ apiRouter.get('/library/:id', async (req, res) => {
   // Title not in library yet: browse it from MangaDex without importing.
   if (!title) {
     try {
-      const remote = await ingest.remoteTitleDetail(id);
+      // `?refresh=1` skips the cache for this one read.
+      const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+      const remote = await ingest.remoteTitleDetail(id, { refresh });
       return res.json({
         inLibrary: false,
-        coverUrl: remote.coverUrl,
+        coverUrl: `/api/cover/${encodeURIComponent(id)}`,
         title: {
           id: remote.id,
           provider: remote.source,
@@ -238,7 +242,7 @@ apiRouter.get('/library/:id', async (req, res) => {
   const progress = lib.getProgress(id);
   res.json({
     inLibrary: true,
-    coverUrl: title.cover_local ? `/api/library/${id}/cover` : null,
+    coverUrl: `/api/cover/${encodeURIComponent(id)}`,
     title: {
       id: title.id,
       provider: title.provider,
@@ -369,14 +373,29 @@ apiRouter.post('/library/:id/chapters/:chapterId/download', async (req, res) => 
   res.json({ started: true });
 });
 
-apiRouter.get('/library/:id/cover', (req, res) => {
-  const { id } = req.params;
-  const title = lib.getTitle(id);
-  if (!title?.cover_local || !fs.existsSync(title.cover_local)) {
-    return res.status(404).json({ error: 'no cover' });
+/**
+ * Covers for any title the app has seen, saved or not. The first request
+ * downloads and stores the image; later ones are served from disk, so browsing
+ * the same page twice costs the upstream CDN nothing.
+ */
+async function sendCover(id: string, res: Response): Promise<void> {
+  const file = await coverFile(id);
+  if (!file || !fs.existsSync(file)) {
+    res.status(404).json({ error: 'no cover' });
+    return;
   }
-  res.setHeader('Content-Type', contentType(title.cover_local));
-  res.sendFile(path.resolve(title.cover_local));
+  res.setHeader('Content-Type', contentType(file));
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.sendFile(path.resolve(file));
+}
+
+apiRouter.get('/cover/:id', async (req, res) => {
+  await sendCover(req.params.id, res);
+});
+
+// Kept because saved titles have linked to it since before the cover cache.
+apiRouter.get('/library/:id/cover', async (req, res) => {
+  await sendCover(req.params.id, res);
 });
 
 apiRouter.get('/library/data/:titleId/:chapterId/:pageNumber', (req, res) => {

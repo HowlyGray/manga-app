@@ -13,7 +13,8 @@ interface Props {
  * in the body made rows ragged whenever a title wrapped to two lines.
  */
 export default function TitleCard({ item, busy, onAdd }: Props) {
-  const cover = item.isSaved ? `/api/library/${item.id}/cover` : item.coverUrl ?? undefined;
+  // The server always hands back its own cached cover URL, saved or not.
+  const cover = item.coverUrl ?? undefined;
   const meta = [item.year, item.originalLanguage?.toUpperCase(), item.status].filter(Boolean);
 
   return (

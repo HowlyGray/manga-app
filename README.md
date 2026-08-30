@@ -124,6 +124,25 @@ Sources declare what they support: `GET /api/sources` reports `hasTags` and
 `hasShelves`, and the UI hides genre browsing for a source that has no tag
 vocabulary rather than showing an empty picker.
 
+## Cache
+
+Anything a source tells the app is kept, so browsing the same page twice costs
+the upstream service nothing.
+
+- **Covers** land in `library/covers/cache/` the first time a tile is displayed
+  and are never refetched — a cover for a given title does not change. Every
+  card points at `/api/cover/<id>` rather than at the upstream CDN, so the
+  server can serve the stored copy. Roughly 50 KB each; delete the folder at any
+  time to reclaim the space.
+- **Title metadata** (description, tags, author, status, cover URL) and
+  **chapter indexes** are stored in the `source_cache` table. Metadata expires
+  after a week and chapter indexes after an hour, because new chapters appear
+  constantly and a synopsis does not. Both are configurable, and
+  `GET /api/library/<id>?refresh=1` bypasses them for one read.
+
+Measured on a title outside the library: metadata 0.94s cold against 0.20s
+warm, a cover 1.02s against 0.21s.
+
 ## Chapter language preference
 
 A series often exists in several fan translations, and which one you download
@@ -282,6 +301,9 @@ npm run sync -w server -- <command> [options]
 | `DEEPL_API_URL`         | –            | Override the DeepL base URL                                    |
 | `DOWNLOAD_LANGS`        | –            | Preferred chapter languages, best first (e.g. `pt-br,es,en`)   |
 | `TRANSLATE_SRC`         | `ja`         | Source language **only** for chapters with no language set     |
+| `CACHE_TITLE_MS`        | `604800000`  | How long cached title metadata stays fresh (7 days)            |
+| `CACHE_CHAPTERS_MS`     | `3600000`    | How long a cached chapter index stays fresh (1 hour)           |
+| `CACHE_COVER_CONCURRENCY` | `6`        | Parallel cover downloads when a grid first loads               |
 | `TRANSLATE_MIN_CONF`    | `55`         | Drop OCR lines below this confidence (0-100)                   |
 | `TRANSLATE_REFINE`      | `1`          | `0` disables the whole-balloon re-read pass                     |
 | `TRANSLATE_FONT`        | –            | Path to the font used for baked pages (a bold comic face)      |
@@ -299,6 +321,7 @@ npm run sync -w server -- <command> [options]
 ```
 data/          SQLite DB (titles, chapters, download state)
 library/       covers/            downloaded title covers
+               covers/cache/      covers of titles only browsed
                data/<title>/<chapter>/  page images
                                         .ocr/  recognized text, per page
                                         .trl/  layout JSON + rendered pages

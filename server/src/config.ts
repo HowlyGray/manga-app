@@ -26,6 +26,13 @@ export const config = {
   jikan: {
     apiIntervalMs: Number(process.env.JIKAN_API_MS ?? 380),
   },
+  cache: {
+    // Title metadata barely changes; chapter indexes gain entries constantly.
+    titleMs: Number(process.env.CACHE_TITLE_MS ?? 7 * 24 * 3600_000),
+    chaptersMs: Number(process.env.CACHE_CHAPTERS_MS ?? 3600_000),
+    // Covers are immutable in practice, so they are kept until deleted.
+    coverConcurrency: Number(process.env.CACHE_COVER_CONCURRENCY ?? 6),
+  },
   weebcentral: {
     // Secondary source, used mostly for series MangaDex no longer carries.
     enabled: (process.env.WEEBCENTRAL ?? '1') !== '0',
@@ -88,10 +95,12 @@ export const config = {
 
 export const dbPath = path.join(config.dataDir, 'library.db');
 export const coverDir = path.join(config.libraryDir, 'covers');
+/** Covers of titles that are only browsed, not saved to the library. */
+export const coverCacheDir = path.join(coverDir, 'cache');
 export const dataDir = path.join(config.libraryDir, 'data');
 
 export function ensureDirs(): void {
-  for (const dir of [config.dataDir, coverDir, dataDir]) {
+  for (const dir of [config.dataDir, coverDir, coverCacheDir, dataDir]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 }

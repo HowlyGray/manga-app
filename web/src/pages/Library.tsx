@@ -26,7 +26,7 @@ function LibraryCard({ t }: { t: LibraryTitle }) {
         <div className="card-cover-wrap">
           <img
             className="card-cover"
-            src={`/api/library/${t.id}/cover`}
+            src={`/api/cover/${encodeURIComponent(t.id)}`}
             alt=""
             loading="lazy"
             onError={(e) => {
