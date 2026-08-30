@@ -106,6 +106,24 @@ breaks when a site is redesigned.
 To add a source, implement `SourceProvider` under `server/src/sources/` and
 register it in `server/src/sources/index.ts`.
 
+## Browsing
+
+The home page is a trends view rather than a search box: rows for what is most
+followed, what updated most recently, what was added in the last 30 days ranked
+by followers, and what is rated highest, plus one-click genre shortcuts. Rows
+are built from four searches and cached for ten minutes — the point is what is
+moving, not up-to-the-second accuracy.
+
+`/browse` is the full catalogue: search, source, order, original language, and
+a tag picker grouped into genre / theme / format (77 tags on MangaDex, and a
+title must carry all the ones you pick). Every filter lives in the URL, so a
+genre chip, a shelf's *See all*, and the browser's back button all work the way
+you would expect, and a filtered view can be bookmarked.
+
+Sources declare what they support: `GET /api/sources` reports `hasTags` and
+`hasShelves`, and the UI hides genre browsing for a source that has no tag
+vocabulary rather than showing an empty picker.
+
 ## Chapter language preference
 
 A series often exists in several fan translations, and which one you download

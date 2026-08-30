@@ -28,6 +28,33 @@ export interface SourceInfo {
   id: string;
   label: string;
   browsable: boolean;
+  /** The source can filter by genre/theme tags. */
+  hasTags: boolean;
+  /** The source has featured rows for the home page. */
+  hasShelves: boolean;
+}
+
+export interface Tag {
+  id: string;
+  name: string;
+  /** `genre`, `theme`, `format`, `content`. */
+  group: string;
+}
+
+export type SearchSort = 'popular' | 'latest' | 'newest' | 'rating' | 'relevance' | 'title';
+
+export interface Shelf {
+  id: string;
+  title: string;
+  subtitle: string;
+  /** Filters that reproduce the shelf in the browse view. */
+  browse: { sort?: SearchSort; createdSince?: string } | null;
+  titles: DiscoverItem[];
+}
+
+export interface HomeResponse {
+  source: string;
+  shelves: Shelf[];
 }
 
 export interface LibraryTitle {

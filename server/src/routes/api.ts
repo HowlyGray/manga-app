@@ -41,11 +41,68 @@ apiRouter.get('/ping', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
-/** Content sources the server can browse. */
+/** Content sources the server can browse, and what each one supports. */
 apiRouter.get('/sources', (_req, res) => {
   res.json({
-    sources: listProviders().map((p) => ({ id: p.id, label: p.label, browsable: p.browsable })),
+    sources: listProviders().map((p) => ({
+      id: p.id,
+      label: p.label,
+      browsable: p.browsable,
+      hasTags: typeof p.listTags === 'function',
+      hasShelves: typeof p.homeShelves === 'function',
+    })),
   });
+});
+
+/** Genres, themes and formats a source can filter by. */
+apiRouter.get('/tags', async (req, res) => {
+  const source = typeof req.query.source === 'string' ? req.query.source : undefined;
+  if (source && !hasProvider(source)) {
+    return res.status(400).json({ error: `unknown source: ${source}` });
+  }
+  try {
+    res.json({ source: source ?? 'mangadex', tags: await ingest.sourceTags(source) });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[tags] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
+/** Featured rows for the home page. */
+apiRouter.get('/home', async (req, res) => {
+  const source = typeof req.query.source === 'string' ? req.query.source : undefined;
+  if (source && !hasProvider(source)) {
+    return res.status(400).json({ error: `unknown source: ${source}` });
+  }
+  try {
+    const { source: used, shelves } = await ingest.homeShelves(source);
+    res.json({
+      source: used,
+      shelves: shelves.map((shelf) => ({
+        id: shelf.id,
+        title: shelf.title,
+        subtitle: shelf.subtitle,
+        browse: shelf.browse ?? null,
+        titles: shelf.titles.map((t) => ({
+          id: t.libraryId,
+          source: used,
+          title: t.title,
+          altTitles: [],
+          originalLanguage: t.originalLang,
+          year: t.year,
+          status: t.status,
+          tags: t.tags.slice(0, 6),
+          coverUrl: t.coverUrl,
+          isSaved: lib.getTitle(t.libraryId) != null,
+        })),
+      })),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[home] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
 });
 
 apiRouter.get('/discover', async (req, res) => {
@@ -57,9 +114,21 @@ apiRouter.get('/discover', async (req, res) => {
   }
   const page = Math.max(1, Number(req.query.page ?? 1) || 1);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 24) || 24));
+  const tags = typeof req.query.tags === 'string' ? req.query.tags.split(',').filter(Boolean) : undefined;
+  const sort = typeof req.query.sort === 'string' ? (req.query.sort as never) : undefined;
+  const createdSince = typeof req.query.createdSince === 'string' ? req.query.createdSince : undefined;
   let result: Awaited<ReturnType<typeof ingest.discover>>;
   try {
-    result = await ingest.discover({ q, lang, limit, offset: (page - 1) * limit, source });
+    result = await ingest.discover({
+      q,
+      lang,
+      limit,
+      offset: (page - 1) * limit,
+      source,
+      tags,
+      sort,
+      createdSince,
+    });
   } catch (err) {
     // Without this the default Express handler answers an HTML error page to a
     // JSON endpoint, and the client reports a parse error instead of the cause.

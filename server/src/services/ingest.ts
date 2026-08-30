@@ -10,6 +10,8 @@ import {
   decodeId,
   encodeId,
   getProvider,
+  type SourceShelf,
+  type SourceTag,
   type SourceChapter,
   type SourceProvider,
   type SourceSearch,
@@ -30,6 +32,27 @@ export interface DiscoverResult {
   /** Largest offset the source accepts, or null when unbounded. */
   maxOffset: number | null;
   titles: (SourceTitle & { libraryId: string })[];
+}
+
+/** Tags the source can filter by; empty when it offers no tag browsing. */
+export async function sourceTags(source?: string): Promise<SourceTag[]> {
+  const provider = getProvider(source);
+  return provider.listTags ? provider.listTags() : [];
+}
+
+/** Home rows, with library ids attached so cards link straight through. */
+export async function homeShelves(
+  source?: string,
+): Promise<{ source: string; shelves: (Omit<SourceShelf, 'titles'> & { titles: (SourceTitle & { libraryId: string })[] })[] }> {
+  const provider = getProvider(source);
+  const shelves = provider.homeShelves ? await provider.homeShelves() : [];
+  return {
+    source: provider.id,
+    shelves: shelves.map((shelf) => ({
+      ...shelf,
+      titles: shelf.titles.map((t) => ({ ...t, libraryId: encodeId(provider.id, t.id) })),
+    })),
+  };
 }
 
 export async function discover(params: DiscoverParams): Promise<DiscoverResult> {

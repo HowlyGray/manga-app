@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Route, Routes } from 'react-router-dom';
-import Discover from './pages/Discover';
+import Home from './pages/Home';
+import Browse from './pages/Browse';
 import Library from './pages/Library';
 import TitleDetail from './pages/TitleDetail';
 import Reader from './pages/Reader';
@@ -22,7 +23,10 @@ export default function App() {
           </NavLink>
           <nav className="nav">
             <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
-              Discover
+              Home
+            </NavLink>
+            <NavLink to="/browse" className={({ isActive }) => (isActive ? 'active' : '')}>
+              Browse
             </NavLink>
             <NavLink to="/library" className={({ isActive }) => (isActive ? 'active' : '')}>
               Library
@@ -36,7 +40,8 @@ export default function App() {
 
       <main className="content">
         <Routes>
-          <Route path="/" element={<Discover />} />
+          <Route path="/" element={<Home />} />
+          <Route path="/browse" element={<Browse />} />
           <Route path="/library" element={<Library />} />
           <Route path="/library/:id" element={<TitleDetail />} />
           <Route path="/library/:id/read/:chapterId" element={<Reader />} />

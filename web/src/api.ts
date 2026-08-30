@@ -6,7 +6,15 @@ import type {
   Progress,
   TitleDetailResponse,
 } from './types';
-import type { ChapterTranslateState, PageOverlay, SourceInfo, TranslateLanguages } from './types';
+import type {
+  ChapterTranslateState,
+  HomeResponse,
+  PageOverlay,
+  SearchSort,
+  SourceInfo,
+  Tag,
+  TranslateLanguages,
+} from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -31,11 +39,37 @@ export const api = {
     return request<{ sources: SourceInfo[] }>('/api/sources');
   },
 
-  discover(params: { q?: string; lang?: string; source?: string; page?: number; limit?: number } = {}) {
+  tags(source?: string) {
+    const s = new URLSearchParams();
+    if (source) s.set('source', source);
+    return request<{ source: string; tags: Tag[] }>(`/api/tags?${s.toString()}`);
+  },
+
+  home(source?: string) {
+    const s = new URLSearchParams();
+    if (source) s.set('source', source);
+    return request<HomeResponse>(`/api/home?${s.toString()}`);
+  },
+
+  discover(
+    params: {
+      q?: string;
+      lang?: string;
+      source?: string;
+      tags?: string[];
+      sort?: SearchSort;
+      createdSince?: string;
+      page?: number;
+      limit?: number;
+    } = {},
+  ) {
     const s = new URLSearchParams();
     if (params.q) s.set('q', params.q);
     if (params.lang) s.set('lang', params.lang);
     if (params.source) s.set('source', params.source);
+    if (params.tags?.length) s.set('tags', params.tags.join(','));
+    if (params.sort) s.set('sort', params.sort);
+    if (params.createdSince) s.set('createdSince', params.createdSince);
     s.set('page', String(params.page ?? 1));
     s.set('limit', String(params.limit ?? 24));
     return request<DiscoverResponse>(`/api/discover?${s.toString()}`);

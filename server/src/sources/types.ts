@@ -38,12 +38,39 @@ export interface SourceChapter {
   externalUrl: string | null;
 }
 
+/** How a result set is ordered. Providers map these onto their own vocabulary. */
+export type SearchSort = 'popular' | 'latest' | 'newest' | 'rating' | 'relevance' | 'title';
+
 export interface SourceSearch {
   q?: string;
   /** Original language filter, when the provider supports one. */
   lang?: string;
   limit?: number;
   offset?: number;
+  /** Tag ids from `listTags`; a title must carry all of them. */
+  tags?: string[];
+  sort?: SearchSort;
+  /** ISO timestamp; only titles added to the source after it. */
+  createdSince?: string;
+}
+
+/** A genre, theme or format a source can filter by. */
+export interface SourceTag {
+  id: string;
+  name: string;
+  /** `genre`, `theme`, `format`, `content`, … — used to group the picker. */
+  group: string;
+}
+
+/** A row of titles on the home page. */
+export interface SourceShelf {
+  id: string;
+  title: string;
+  /** One line explaining what the row actually ranks. */
+  subtitle: string;
+  titles: SourceTitle[];
+  /** Filters that reproduce this shelf in the browse view, when they exist. */
+  browse?: Pick<SourceSearch, 'sort' | 'createdSince'>;
 }
 
 /** One page image. Some providers need a referer or other headers to serve it. */
@@ -87,4 +114,9 @@ export interface SourceProvider {
   chapterPages(chapterId: string): Promise<PageImage[]>;
   /** Fetches one image, applying whatever headers the provider requires. */
   fetchImage(image: PageImage): Promise<Response>;
+
+  /** Tags this source can filter by. Absent when it offers no tag browsing. */
+  listTags?(): Promise<SourceTag[]>;
+  /** Rows for the home page. Absent when the source has nothing to feature. */
+  homeShelves?(): Promise<SourceShelf[]>;
 }

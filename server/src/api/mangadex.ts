@@ -183,12 +183,36 @@ function mdGet<T>(url: string): Promise<T | null> {
   );
 }
 
+export type MangaSort = 'followedCount' | 'latestUploadedChapter' | 'createdAt' | 'rating' | 'relevance' | 'title';
+
 export interface SearchMangaParams {
   q?: string;
   lang?: string;
   limit?: number;
   offset?: number;
-  sort?: 'followedCount' | 'latestUploadedChapter' | 'title';
+  sort?: MangaSort;
+  /** Tag ids; a title must carry all of them. */
+  includedTags?: string[];
+  /** ISO timestamp (no zone suffix); only titles added after it. */
+  createdSince?: string;
+}
+
+/** `order[x]` parameter for a sort, and the direction it reads best in. */
+function orderFor(sort: MangaSort): [string, string] {
+  switch (sort) {
+    case 'latestUploadedChapter':
+      return ['order[latestUploadedChapter]', 'desc'];
+    case 'createdAt':
+      return ['order[createdAt]', 'desc'];
+    case 'rating':
+      return ['order[rating]', 'desc'];
+    case 'relevance':
+      return ['order[relevance]', 'desc'];
+    case 'title':
+      return ['order[title]', 'asc'];
+    default:
+      return ['order[followedCount]', 'desc'];
+  }
 }
 
 export async function searchManga(
@@ -198,12 +222,15 @@ export async function searchManga(
   const query = new URLSearchParams();
   if (q) query.set('title', q);
   if (lang) query.append('originalLanguage[]', lang);
+  for (const tag of params.includedTags ?? []) query.append('includedTags[]', tag);
+  if (params.createdSince) query.set('createdAtSince', params.createdSince);
   query.append('hasAvailableChapters', 'true');
   query.append('contentRating[]', 'safe');
   query.append('contentRating[]', 'suggestive');
-  query.set('order[followedCount]', 'desc');
-  if (sort === 'latestUploadedChapter') query.set('order[latestUploadedChapter]', 'desc');
-  if (sort === 'title') query.set('order[title]', 'asc');
+  // Exactly one order: the previous code set followedCount and then sometimes
+  // added a second one, leaving the effective sort up to the server.
+  const [orderKey, orderValue] = orderFor(sort);
+  query.set(orderKey, orderValue);
   query.set('limit', String(limit));
   query.set('offset', String(offset));
   query.append('includes[]', 'cover_art');
@@ -215,6 +242,27 @@ export async function searchManga(
     titles: (res?.data ?? []).map(parseManga),
     total: res?.total ?? 0,
   };
+}
+
+export interface MangaDexTag {
+  id: string;
+  name: string;
+  /** `genre`, `theme`, `format` or `content`. */
+  group: string;
+}
+
+/** The tag vocabulary. It is small and effectively static, so callers cache it. */
+export async function listTags(): Promise<MangaDexTag[]> {
+  const res = await mdGet<{
+    data?: { id: string; attributes?: { name?: Record<string, string>; group?: string } }[];
+  }>(`${BASE}/manga/tag`);
+  return (res?.data ?? [])
+    .map((t) => ({
+      id: t.id,
+      name: t.attributes?.name?.en ?? Object.values(t.attributes?.name ?? {})[0] ?? t.id,
+      group: t.attributes?.group ?? 'other',
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function getManga(id: string): Promise<MangaDexTitle | null> {

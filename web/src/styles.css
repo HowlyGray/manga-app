@@ -948,3 +948,110 @@ a {
   height: 100%;
   background: var(--accent);
 }
+
+/* ---- home ---- */
+
+.hero {
+  margin: 4px 0 26px;
+}
+
+.hero-title {
+  margin: 0 0 14px;
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.hero-search {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.hero-search .search {
+  flex: 1 1 320px;
+  max-width: 560px;
+}
+
+.shelf-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.shelf-head .shelf-title {
+  margin: 0;
+}
+
+.shelf-sub {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 2px;
+}
+
+.shelf-more {
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/*
+ * Horizontal rail: four trend rows fit on one screen, and each row scrolls
+ * independently instead of pushing the next one off the page.
+ */
+.rail {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  padding-bottom: 8px;
+  scrollbar-width: thin;
+}
+
+.rail-item {
+  flex: 0 0 158px;
+  scroll-snap-align: start;
+}
+
+.rail .card {
+  height: 100%;
+}
+
+/* ---- tag picker ---- */
+
+.tag-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  padding: 14px 16px;
+  margin-bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tag-group-label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.chips.wrap {
+  flex-wrap: wrap;
+}
+
+.chip.tiny {
+  padding: 5px 11px;
+  font-size: 0.78rem;
+}
+
+a.chip {
+  display: inline-block;
+}

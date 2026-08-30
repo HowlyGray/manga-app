@@ -14,7 +14,14 @@
  */
 import { config } from '../config';
 import { RateLimiter } from '../util/net';
-import type { PageImage, SourceChapter, SourceProvider, SourceSearch, SourceTitle } from './types';
+import type {
+  PageImage,
+  SourceChapter,
+  SourceProvider,
+  SourceSearch,
+  SourceShelf,
+  SourceTitle,
+} from './types';
 
 const BASE = 'https://weebcentral.com';
 
@@ -125,14 +132,18 @@ export const weebcentralProvider: SourceProvider = {
       limit: String(limit),
       offset: String(offset),
       text: params.q ?? '',
-      sort: params.q ? 'Best Match' : 'Popularity',
+      // The site offers no tag or date filters on this endpoint, so anything
+      // beyond a term and an order is silently ignored.
+      sort: params.sort === 'latest' ? 'Latest Updates' : params.q ? 'Best Match' : 'Popularity',
       order: 'Descending',
       display_mode: 'Full Display',
     });
 
     const html = await getHtml(`${BASE}/search/data?${query.toString()}`);
-    // The site reports no result count anywhere, so the pager runs blind.
-    return { total: null, titles: parseSearchResults(html) };
+    // The site treats `limit` as a hint and can return more, so honour the
+    // caller's page size here -- the pager's arithmetic depends on it.
+    // It reports no result count anywhere, so the pager runs blind.
+    return { total: null, titles: parseSearchResults(html).slice(0, limit) };
   },
 
   async getTitle(id: string): Promise<SourceTitle | null> {
@@ -225,5 +236,28 @@ export const weebcentralProvider: SourceProvider = {
 
   fetchImage(image: PageImage) {
     return fetch(image.url, { headers: { ...HEADERS, ...image.headers } });
+  },
+
+  /**
+   * No tag vocabulary is exposed here, so `listTags` is deliberately absent and
+   * the UI hides genre browsing for this source rather than showing an empty
+   * picker.
+   */
+  async homeShelves(): Promise<SourceShelf[]> {
+    const shelves: SourceShelf[] = [];
+    for (const spec of [
+      { id: 'popular', title: 'Popular on WeebCentral', subtitle: 'Most read overall', sort: 'popular' as const },
+      { id: 'latest', title: 'Fresh chapters', subtitle: 'Updated most recently', sort: 'latest' as const },
+    ]) {
+      try {
+        const { titles } = await weebcentralProvider.search({ sort: spec.sort, limit: 18 });
+        if (titles.length > 0) {
+          shelves.push({ id: spec.id, title: spec.title, subtitle: spec.subtitle, titles, browse: { sort: spec.sort } });
+        }
+      } catch (err) {
+        console.error(`[home] shelf ${spec.id} failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    return shelves;
   },
 };
