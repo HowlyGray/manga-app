@@ -9,6 +9,8 @@ import { isLlmConfigured } from '../services/translator';
 import { langSpec } from '../services/lang';
 import { hasProvider, listProviders } from '../sources';
 import { coverFile } from '../services/sourceCache';
+import { previewChapterInfo, previewPages } from '../services/preview';
+import { decodeId, getProvider } from '../sources';
 import { downloadChapter } from '../downloader';
 import { getChapterTranslateStatus, startChapterTranslate } from '../services/chapterTranslate';
 
@@ -401,11 +403,13 @@ apiRouter.get('/library/:id/cover', async (req, res) => {
 apiRouter.get('/library/data/:titleId/:chapterId/:pageNumber', (req, res) => {
   const { titleId, chapterId } = req.params;
   const pageNumber = Number(req.params.pageNumber);
-  const page = lib.listPages(chapterId).find((p) => p.page_number === pageNumber);
-  if (!page?.local_path || !fs.existsSync(page.local_path)) {
+  // Resolves through the file on disk, so a chapter whose rows lost their
+  // paths still serves instead of 404-ing with every image sitting right there.
+  const local = lib.pageFile(titleId, chapterId, pageNumber);
+  if (!local) {
     return res.status(404).json({ error: 'page not downloaded' });
   }
-  const filePath = path.resolve(page.local_path);
+  const filePath = path.resolve(local);
   res.setHeader('Content-Type', contentType(filePath));
   res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   res.sendFile(filePath);
@@ -419,6 +423,73 @@ function chapterSourceLang(titleId: string, chapterId: string): string {
   const chapter = lib.getChapter(titleId, chapterId);
   return chapter?.language || config.translate.defaultSource;
 }
+
+/**
+ * A chapter read straight from its source, with nothing saved. Mirrors the
+ * shape of the downloaded-chapter response so the reader renders both the same
+ * way; `preview: true` is what tells it the pages are not local.
+ */
+apiRouter.get('/preview/:titleId/:chapterId', async (req, res) => {
+  const { titleId, chapterId } = req.params;
+  try {
+    const [info, pages] = await Promise.all([
+      previewChapterInfo(titleId, chapterId),
+      previewPages(titleId, chapterId),
+    ]);
+    const encoded = `${encodeURIComponent(titleId)}/${encodeURIComponent(chapterId)}`;
+    res.json({
+      preview: true,
+      chapter: {
+        id: chapterId,
+        chapter: info?.chapter ?? null,
+        title: info?.title ?? null,
+        volume: info?.volume ?? null,
+        language: info?.language ?? '',
+        languageLabel: langSpec(info?.language).label,
+        pages: pages.length,
+        scanlator: info?.scanlator ?? null,
+        publishedAt: info?.publishedAt ?? null,
+        downloaded: 0,
+        downloadError: null,
+        downloading: false,
+      },
+      pages: pages.map((_, i) => ({
+        pageNumber: i + 1,
+        downloaded: 0,
+        url: `/api/preview/${encoded}/${i + 1}`,
+      })),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[preview ${chapterId}] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
+/** Streams one preview page through the provider, so its headers apply. */
+apiRouter.get('/preview/:titleId/:chapterId/:pageNumber', async (req, res) => {
+  const { titleId, chapterId } = req.params;
+  const pageNumber = Number(req.params.pageNumber);
+  try {
+    const pages = await previewPages(titleId, chapterId);
+    const image = pages[pageNumber - 1];
+    if (!image) return res.status(404).json({ error: 'page out of range' });
+
+    const upstream = await getProvider(decodeId(titleId).provider).fetchImage(image);
+    if (!upstream.ok || !upstream.body) {
+      return res.status(502).json({ error: `source returned HTTP ${upstream.status}` });
+    }
+    res.setHeader('Content-Type', upstream.headers.get('content-type') ?? 'image/jpeg');
+    // Only the browser caches these; nothing is written to the library.
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    res.send(buffer);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[preview ${chapterId} p${pageNumber}] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
 
 apiRouter.get('/translate/languages', (_req, res) => {
   res.json({

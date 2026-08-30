@@ -15,7 +15,7 @@ import { eraseInto, fitBubble, type Box, type BubbleFit, type PageRaster } from 
 import { fontStack } from './fonts';
 import { isSameLanguage, langSpec, targetScript, wrapsAnywhere, type Script } from './lang';
 import { ocrPage, refineRegions, type RefineRegion } from './pageOcr';
-import { listPages } from './library';
+import { listPages, pageFile } from './library';
 import { groupIntoBlocks, type TextBlock } from './textBlocks';
 import { translateBlocks, type Provider } from './translator';
 
@@ -606,7 +606,7 @@ export function translatePage(opts: TranslateOptions): Promise<TranslatedPage> {
 
 /** Look up a downloaded page's local path for a title/chapter. */
 export function pageLocalPath(titleId: string, chapterId: string, pageNumber: number): string | null {
-  return listPages(chapterId).find((p) => p.page_number === pageNumber)?.local_path ?? null;
+  return pageFile(titleId, chapterId, pageNumber);
 }
 
 export { listPages };

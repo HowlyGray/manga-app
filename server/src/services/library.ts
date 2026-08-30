@@ -1,7 +1,8 @@
 import type Database from 'better-sqlite3';
+import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config';
-import { getDb } from '../db';
+import { chapterDir, getDb } from '../db';
 import { languageRanker } from './lang';
 
 export interface TitleRecord {
@@ -309,25 +310,59 @@ export function setChapterDownloaded(
   ).run({ id: chapterId, downloaded, error: error ?? null });
 }
 
+/**
+ * Records the page list for a chapter, keeping whatever is already downloaded.
+ *
+ * This used to DELETE every row and re-insert, which threw away `local_path`
+ * for files still sitting on disk. Re-running a download then had a window
+ * where the library pointed at nothing until each page was re-marked, and a
+ * crash or restart inside it left the chapter permanently unreadable with all
+ * of its images present.
+ */
 export function replaceChapterPages(
   chapterId: string,
   pageCount: number | null,
   files: string[],
 ): void {
   const db = getDb();
-  db.prepare('DELETE FROM pages WHERE chapter_id = ?').run(chapterId);
-  const insert = db.prepare(
-    `INSERT INTO pages (chapter_id, page_number, file_name) VALUES (?, ?, ?)`,
+  const upsert = db.prepare(
+    `INSERT INTO pages (chapter_id, page_number, file_name) VALUES (?, ?, ?)
+     ON CONFLICT(chapter_id, page_number) DO UPDATE SET file_name = excluded.file_name`,
   );
-  const tx = db.transaction((items: [string, number, string][]) => {
-    for (const [cid, num, name] of items) insert.run(cid, num, name);
+  const trim = db.prepare('DELETE FROM pages WHERE chapter_id = ? AND page_number > ?');
+  const tx = db.transaction((names: string[]) => {
+    names.forEach((name, i) => upsert.run(chapterId, i + 1, name));
+    // Only pages that no longer exist upstream are removed.
+    trim.run(chapterId, names.length);
   });
-  tx(
-    files.map((f, i) => [chapterId, i + 1, f] as [string, number, string]),
-  );
+  tx(files);
   if (pageCount != null) {
     db.prepare('UPDATE chapters SET pages = ? WHERE id = ?').run(pageCount, chapterId);
   }
+}
+
+/**
+ * On-disk file for a page, repairing the row when the database lost track of a
+ * file that is still there. Pages are written as `0001.png`, `0002.jpg`, … so
+ * the name can be recovered from the page number alone.
+ */
+export function pageFile(titleId: string, chapterId: string, pageNumber: number): string | null {
+  const known = listPages(chapterId).find((p) => p.page_number === pageNumber)?.local_path;
+  if (known && fs.existsSync(known)) return known;
+
+  const dir = chapterDir(titleId, chapterId);
+  const prefix = String(pageNumber).padStart(4, '0');
+  let match: string | undefined;
+  try {
+    match = fs.readdirSync(dir).find((f) => f.startsWith(`${prefix}.`));
+  } catch {
+    return null;
+  }
+  if (!match) return null;
+
+  const local = path.join(dir, match);
+  markPageDownloaded(chapterId, pageNumber, local, null);
+  return local;
 }
 
 export function markPageDownloaded(chapterId: string, pageNumber: number, localPath: string, size: number | null): void {

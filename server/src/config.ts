@@ -32,6 +32,8 @@ export const config = {
     chaptersMs: Number(process.env.CACHE_CHAPTERS_MS ?? 3600_000),
     // Covers are immutable in practice, so they are kept until deleted.
     coverConcurrency: Number(process.env.CACHE_COVER_CONCURRENCY ?? 6),
+    // Page URLs of a previewed chapter; MangaDex's expire, so keep it short.
+    pagesMs: Number(process.env.CACHE_PAGES_MS ?? 10 * 60_000),
   },
   weebcentral: {
     // Secondary source, used mostly for series MangaDex no longer carries.

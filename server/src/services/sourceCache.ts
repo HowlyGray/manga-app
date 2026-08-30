@@ -14,7 +14,7 @@ import { getDb, pathSegment } from '../db';
 import { decodeId, getProvider, type SourceChapter, type SourceTitle } from '../sources';
 import { getTitle } from './library';
 
-type Kind = 'title' | 'chapters';
+type Kind = 'title' | 'chapters' | 'pages';
 
 interface CacheRow {
   payload: string;
@@ -73,6 +73,15 @@ export function cachedChapters(
   maxAgeMs = config.cache.chaptersMs,
 ): SourceChapter[] | null {
   return read<SourceChapter[]>(libraryId, 'chapters', maxAgeMs);
+}
+
+/** Page image URLs of a chapter, so paging a preview does not re-ask upstream. */
+export function rememberPages(chapterLibraryId: string, pages: unknown[]): void {
+  write(chapterLibraryId, 'pages', pages);
+}
+
+export function cachedPages<T>(chapterLibraryId: string, maxAgeMs: number): T[] | null {
+  return read<T[]>(chapterLibraryId, 'pages', maxAgeMs);
 }
 
 /** Drops a title's cached metadata, so the next read goes upstream. */
