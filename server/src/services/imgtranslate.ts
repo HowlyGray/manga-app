@@ -14,13 +14,13 @@ import { chapterDir } from '../db';
 import { eraseInto, fitBubble, type Box, type BubbleFit, type PageRaster } from './bubble';
 import { fontStack } from './fonts';
 import { isSameLanguage, langSpec, targetScript, wrapsAnywhere, type Script } from './lang';
-import { ocrPage } from './pageOcr';
+import { ocrPage, refineRegions, type RefineRegion } from './pageOcr';
 import { listPages } from './library';
 import { groupIntoBlocks, type TextBlock } from './textBlocks';
 import { translateBlocks, type Provider } from './translator';
 
 /** Bump when the overlay shape changes so stale caches are regenerated. */
-const OVERLAY_VERSION = 6;
+const OVERLAY_VERSION = 11;
 
 export interface OverlayBlock {
   id: number;
@@ -223,6 +223,113 @@ function layoutText(
   return best;
 }
 
+
+/** Letters and digits only, upper-cased, for comparing two readings. */
+function normalizeRead(text: string): string {
+  return text
+    .toUpperCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+/** Levenshtein distance, capped: only small distances matter to callers. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(
+        prev[j] + 1,
+        row[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+/** True when `word` is just a misspelling of something already read. */
+function isVariantOf(word: string, known: string[]): boolean {
+  return known.some((k) => editDistance(word, k) <= Math.max(1, Math.floor(k.length / 4)));
+}
+
+/**
+ * Accepts a whole-bubble re-read only when it is the *same* text with a real
+ * word more of it.
+ *
+ * Two failure modes to exclude: a longer reading that shares nothing with the
+ * first pass is a misread of a bubble whose geometry was wrong, and a reading
+ * that only adds punctuation is the balloon outline being read as characters.
+ */
+function isBetterRead(oldText: string, newText: string): boolean {
+  const before = normalizeRead(oldText);
+  const after = normalizeRead(newText);
+  if (!after) return false;
+  const beforeLen = before.replace(/ /g, '').length;
+  const afterLen = after.replace(/ /g, '').length;
+  if (afterLen <= beforeLen) return false;
+  // A read several times longer has spilled outside the balloon.
+  if (beforeLen > 0 && afterLen > beforeLen * 3.5) return false;
+
+  const words = before.split(' ').filter((w) => w.length >= 3);
+  // A "gained" word that is one or two characters off a word already read is a
+  // corruption of it, not a recovered line ("LINFORSEEN" for "UNFORSEEN").
+  const gained = after
+    .split(' ')
+    .filter((w) => w.length >= 3 && !words.includes(w) && !isVariantOf(w, words));
+  // Nothing but stray marks was recovered.
+  if (gained.length === 0) return false;
+  if (words.length === 0) return true;
+  // Words the first pass read must survive almost intact. A re-read that adds
+  // one word while garbling two others is a different reading, not a better
+  // one, and swapping it in loses text that was already correct.
+  const kept = words.filter((w) => after.includes(w)).length;
+  return kept / words.length >= 0.85;
+}
+
+/**
+ * Re-reads each detected balloon as one block and adopts the result when it
+ * recovers text the per-line pass dropped.
+ */
+async function refineBlockText(
+  opts: TranslateOptions,
+  blocks: TextBlock[],
+  fits: Map<number, BubbleFit>,
+  sourceLang: string,
+): Promise<void> {
+  const regions: RefineRegion[] = [];
+  blocks.forEach((block, i) => {
+    const fit = fits.get(i);
+    if (!fit?.inBubble) return;
+    // Only balloons the recognized text does not account for are worth
+    // re-reading: that empty space is where a dropped line used to be. Re-doing
+    // a balloon that is already full trades one reading for another of equal
+    // quality, and sometimes loses a word that the first pass had right.
+    const blockArea = (block.x1 - block.x0) * (block.y1 - block.y0);
+    const fitArea = (fit.x1 - fit.x0) * (fit.y1 - fit.y0);
+    if (fitArea <= 0 || blockArea / fitArea > 0.8) return;
+    // Inset the crop: the layout box stops *at* the balloon outline, and
+    // feeding that outline to tesseract turns it into stray glyphs.
+    const insetX = Math.max(3, (fit.x1 - fit.x0) * 0.06);
+    const insetY = Math.max(3, (fit.y1 - fit.y0) * 0.06);
+    regions.push({
+      id: i,
+      x0: fit.x0 + insetX,
+      y0: fit.y0 + insetY,
+      x1: fit.x1 - insetX,
+      y1: fit.y1 - insetY,
+    });
+  });
+  if (regions.length === 0) return;
+
+  const reread = await refineRegions(opts.localPath, regions, sourceLang);
+  for (const [id, text] of reread) {
+    if (isBetterRead(blocks[id].text, text)) blocks[id].text = text;
+  }
+}
+
 /** Runs the whole pipeline for one page. */
 async function analyze(
   opts: TranslateOptions,
@@ -299,6 +406,8 @@ async function analyze(
     fits.set(i, fit);
     claimed.push({ x0: fit.x0, y0: fit.y0, x1: fit.x1, y1: fit.y1 });
   }
+
+  if (config.translate.refine) await refineBlockText(opts, blocks, fits, spec.code);
 
   // Reuse translations we already paid for when only the geometry changed.
   const previous = new Map((cached?.blocks ?? []).map((b) => [b.source, b.text]));

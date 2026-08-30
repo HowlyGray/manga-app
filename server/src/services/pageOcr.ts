@@ -144,6 +144,67 @@ async function tesseractPage(
   }
 }
 
+/** Region of a page to re-read, tagged with the block it belongs to. */
+export interface RefineRegion {
+  id: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/**
+ * Re-reads whole bubbles as single blocks of text.
+ *
+ * The per-line pass drops short lines -- a two-letter middle line often falls
+ * under the confidence floor -- and a bubble then splits into two blocks with
+ * the missing line's words gone for good. Once bubble geometry is known, the
+ * balloon can be handed to tesseract as one uniform block, which reads all of
+ * its lines together and in order. Returns raw text per region id; the caller
+ * decides whether it beats what the first pass assembled.
+ */
+export async function refineRegions(
+  localPath: string,
+  regions: RefineRegion[],
+  sourceLang: string,
+): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  if (regions.length === 0) return out;
+  const spec = langSpec(sourceLang);
+  // manga-ocr is recognition-only and has no notion of page segmentation, so
+  // Japanese pages keep the first pass as-is.
+  if (spec.script === 'jpn') return out;
+
+  return withOcrSlot(async () => {
+    const opened = await openWorker(spec.tesseract, PSM.SINGLE_BLOCK);
+    if (!opened) return out;
+    const img = await loadImage(localPath);
+    try {
+      for (const region of regions) {
+        const sx = Math.max(0, Math.round(region.x0));
+        const sy = Math.max(0, Math.round(region.y0));
+        const sw = Math.min(img.width, Math.round(region.x1)) - sx;
+        const sh = Math.min(img.height, Math.round(region.y1)) - sy;
+        if (sw < 8 || sh < 8) continue;
+
+        const scale = Math.min(3, Math.max(1, 260 / Math.max(sw, sh)));
+        const crop = createCanvas(Math.round(sw * scale), Math.round(sh * scale));
+        const ctx = crop.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, crop.width, crop.height);
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, crop.width, crop.height);
+
+        const { data } = await opened.worker.recognize(crop.toBuffer('image/png'));
+        const text = (data.text ?? '').replace(/\s+/g, ' ').trim();
+        if (text) out.set(region.id, text);
+      }
+    } finally {
+      await opened.worker.terminate();
+    }
+    return out;
+  });
+}
+
 function cachePath(titleId: string, chapterId: string, pageNumber: number, tag: string): string {
   const dir = path.join(chapterDir(titleId, chapterId), '.ocr');
   fs.mkdirSync(dir, { recursive: true });

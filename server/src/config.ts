@@ -43,6 +43,8 @@ export const config = {
     defaultSource: process.env.TRANSLATE_SRC ?? 'ja',
     // Drop OCR lines below this confidence (0-100) before grouping.
     minConfidence: Number(process.env.TRANSLATE_MIN_CONF ?? 55),
+    // Re-read each detected balloon as one block to recover dropped lines.
+    refine: (process.env.TRANSLATE_REFINE ?? '1') !== '0',
     // Manga-OCR (Python sidecar) — set MANGA_OCR=0 to disable.
     mangaOcr: {
       enabled: (process.env.MANGA_OCR ?? '1') !== '0',

@@ -57,9 +57,15 @@ page → detect regions → recognize → group into bubbles → translate page
    the way a reader would follow them (right-to-left columns for Japanese
    tategaki), and joined into one string. Translating line by line is what used
    to turn one sentence into six unrelated fragments.
-5. **Translate** every bubble of the page in a single request, so the engine can
+5. **Re-read under-filled balloons** as a single block. The per-line pass drops
+   short lines, which splits a bubble and loses words for good; once the balloon
+   is known, handing the whole thing to tesseract recovers them. The re-read is
+   only adopted when every word already recognized survives it and a genuinely
+   new one appears, so a differently-garbled reading never replaces a good one.
+   (Japanese pages skip this: `manga-ocr` is recognition-only.)
+6. **Translate** every bubble of the page in a single request, so the engine can
    use the surrounding bubbles as context.
-6. **Erase and lay out.** A bubble is found by flood-filling the uniform region
+7. **Erase and lay out.** A bubble is found by flood-filling the uniform region
    around the text and closing its interior holes, so only the balloon is
    repainted and the artwork survives; text sitting over artwork is never erased
    and gets a translucent plate instead. The translation is then fitted to the
@@ -163,6 +169,7 @@ npm run sync -w server -- <command> [options]
 | `DEEPL_API_URL`         | –            | Override the DeepL base URL                                    |
 | `TRANSLATE_SRC`         | `ja`         | Source language **only** for chapters with no language set     |
 | `TRANSLATE_MIN_CONF`    | `55`         | Drop OCR lines below this confidence (0-100)                   |
+| `TRANSLATE_REFINE`      | `1`          | `0` disables the whole-balloon re-read pass                     |
 | `TRANSLATE_FONT`        | –            | Path to the font used for baked pages (a bold comic face)      |
 | `TRANSLATE_FONT_CJK`    | –            | Path to the font used when the target language is CJK          |
 | `TRANSLATE_DET_THRESH`  | `0.15`       | Text-detection pixel threshold; lower finds fainter lettering  |
