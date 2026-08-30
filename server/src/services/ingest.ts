@@ -249,6 +249,26 @@ export async function importTitle(libraryId: string): Promise<ImportResult> {
   return { id, source: provider.id, title: t.title, chaptersImported: chapters.length, score };
 }
 
+/**
+ * Makes sure one specific chapter exists in the library, importing the title
+ * first if needed.
+ *
+ * An import keeps only one chapter per number, in the language the OCR chain
+ * reads best, so the exact chapter someone previewed may not be among them —
+ * downloading it would then fail with "chapter not found in library".
+ */
+export async function ensureChapter(titleLibraryId: string, chapterLibraryId: string): Promise<void> {
+  if (!lib.getTitle(titleLibraryId)) await importTitle(titleLibraryId);
+  if (lib.getChapter(titleLibraryId, chapterLibraryId)) return;
+
+  const { provider: source, providerId } = decodeId(titleLibraryId);
+  const provider = getProvider(source);
+  const chapters = await provider.listChapters(providerId);
+  const wanted = chapters.find((c) => encodeId(provider.id, c.id) === chapterLibraryId);
+  if (!wanted) throw new Error('chapter not found on the source');
+  upsertChapterForTitle(provider, titleLibraryId, wanted);
+}
+
 function upsertChapterForTitle(provider: SourceProvider, titleId: string, c: SourceChapter): void {
   lib.upsertChapter({
     id: encodeId(provider.id, c.id),

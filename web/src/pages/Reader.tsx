@@ -39,7 +39,9 @@ export default function Reader() {
   const [pageIndex, setPageIndex] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState('');
-  const [retry, setRetry] = useState(0);
+  /** Pages are streaming from the source; nothing is stored locally. */
+  const [preview, setPreview] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const [languages, setLanguages] = useState<TranslateLanguages | null>(null);
   const [translateLang, setTranslateLang] = useState('');
@@ -48,7 +50,6 @@ export default function Reader() {
 
   const imgRefs = useRef<(HTMLImageElement | null)[]>([]);
   const saveTimer = useRef<number | undefined>(undefined);
-  const downloadStarted = useRef(false);
   const restored = useRef(false);
 
   const overlayActive = Boolean(translateLang) && textMode === 'overlay';
@@ -66,21 +67,28 @@ export default function Reader() {
     let cancelled = false;
     setDetail(null);
     setError('');
-    downloadStarted.current = false;
     restored.current = false;
     if (!id || !chapterId) return;
 
     (async () => {
       try {
-        let ti = await api.title(id!);
-        if (!ti.inLibrary) {
-          await api.importTitle(id!);
-          ti = await api.title(id!);
-        }
-        const ch = await api.chapter(id!, chapterId!);
+        const ti = await api.title(id!);
         if (cancelled) return;
         setTitleInfo(ti);
-        setDetail(ch);
+
+        // Only a chapter that is actually on disk is read locally. Everything
+        // else streams from the source, so a title can be sampled before it is
+        // imported and before anything is downloaded.
+        const local = ti.inLibrary ? await api.chapter(id!, chapterId!).catch(() => null) : null;
+        if (cancelled) return;
+
+        if (local && local.chapter.downloaded === 1) {
+          setDetail(local);
+          setPreview(false);
+        } else {
+          setDetail(await api.previewChapter(id!, chapterId!));
+          setPreview(true);
+        }
         if (ti.progress?.chapter_id === chapterId) {
           setMode(ti.progress.mode === 'page' ? 'page' : 'scroll');
         }
@@ -93,42 +101,44 @@ export default function Reader() {
     };
   }, [id, chapterId]);
 
-  // Auto-download the chapter when opened and not yet local.
-  useEffect(() => {
-    if (!id || !chapterId || !detail) return;
-    if (detail.chapter.downloaded === 1 || downloadStarted.current) return;
-
-    downloadStarted.current = true;
+  /**
+   * Saves the chapter locally: imports the title if needed, downloads every
+   * page, then swaps the reader over to the stored copy.
+   */
+  async function saveChapter() {
+    if (!id || !chapterId || saving) return;
+    setSaving(true);
     setDownloading(true);
     setError('');
-    (async () => {
-      try {
-        await api.downloadChapter(id!, chapterId!);
-        const poll = window.setInterval(async () => {
-          const ch = await api.chapter(id!, chapterId!).catch(() => null);
-          if (!ch) return;
-          if (ch.chapter.downloaded === 1) {
-            window.clearInterval(poll);
-            setDetail(ch);
-            setDownloading(false);
-            window.scrollTo(0, 0);
-          } else if (ch.chapter.downloaded === -1) {
-            window.clearInterval(poll);
-            setDetail(ch);
-            setDownloading(false);
-            setError(`Download failed: ${ch.chapter.downloadError ?? 'unknown'}`);
-          }
-        }, 2000);
-      } catch (e) {
-        setDownloading(false);
-        setError((e as Error).message);
-      }
-    })();
-  }, [id, chapterId, detail, retry]);
+    try {
+      await api.downloadChapter(id, chapterId);
+      const poll = window.setInterval(async () => {
+        const ch = await api.chapter(id, chapterId).catch(() => null);
+        if (!ch) return;
+        if (ch.chapter.downloaded === 1) {
+          window.clearInterval(poll);
+          setDetail(ch);
+          setPreview(false);
+          setDownloading(false);
+          setSaving(false);
+          api.title(id).then(setTitleInfo, () => {});
+        } else if (ch.chapter.downloaded === -1) {
+          window.clearInterval(poll);
+          setDownloading(false);
+          setSaving(false);
+          setError(`Download failed: ${ch.chapter.downloadError ?? 'unknown'}`);
+        }
+      }, 2000);
+    } catch (e) {
+      setDownloading(false);
+      setSaving(false);
+      setError((e as Error).message);
+    }
+  }
 
   const pages = detail?.pages ?? [];
   const downloaded = detail?.chapter.downloaded === 1;
-  const ready = downloaded && pages.length > 0;
+  const ready = pages.length > 0;
   const targets = languages?.targets ?? FALLBACK_TARGETS;
 
   function pageUrl(p: PageView): string {
@@ -259,8 +269,13 @@ export default function Reader() {
           <select
             className="chip"
             value={translateLang}
+            disabled={preview}
             onChange={(e) => setTranslateLang(e.target.value)}
-            title={`Text on these pages: ${sourceLabel}`}
+            title={
+              preview
+                ? 'Download this chapter to translate it — the pipeline works on local files'
+                : `Text on these pages: ${sourceLabel}`
+            }
           >
             <option value="">Off</option>
             {targets.map((l) => (
@@ -318,6 +333,18 @@ export default function Reader() {
         )}
       </div>
 
+      {preview && !downloading && (
+        <div className="notice preview-bar">
+          <span>
+            <strong>Preview</strong> — streaming from{' '}
+            {titleInfo?.title.provider ?? 'the source'}. Nothing is saved on this machine.
+          </span>
+          <button className="btn small primary" onClick={saveChapter} disabled={saving}>
+            ⬇ Download this chapter
+          </button>
+        </div>
+      )}
+
       {downloading && (
         <div className="notice">
           <span className="spinner" />
@@ -325,10 +352,6 @@ export default function Reader() {
         </div>
       )}
       {error && <div className="error" style={{ marginBottom: 12 }}>{error}</div>}
-
-      {!downloaded && !downloading && (
-        <div className="notice">This chapter isn't downloaded yet.</div>
-      )}
 
       {mode === 'scroll' && ready && (
         <div className="reader-pages scroll">
@@ -374,20 +397,6 @@ export default function Reader() {
             {pageIndex + 1} / {pages.length}
           </div>
         </>
-      )}
-
-      {!downloaded && !downloading && !error && (
-        <div>
-          <button
-            className="btn primary"
-            onClick={() => {
-              downloadStarted.current = false;
-              setRetry((r) => r + 1);
-            }}
-          >
-            Retry download
-          </button>
-        </div>
       )}
 
       <div className="reader-nav">

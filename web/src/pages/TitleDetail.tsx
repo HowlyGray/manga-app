@@ -317,9 +317,9 @@ export default function TitleDetail() {
               <button
                 className="btn small primary"
                 onClick={() => navigate(`/library/${id}/read/${c.id}`)}
-                disabled={c.downloaded !== 1}
+                title={c.downloaded === 1 ? 'Read the downloaded chapter' : 'Preview from the source'}
               >
-                Read
+                {c.downloaded === 1 ? 'Read' : 'Preview'}
               </button>
             </div>
           </div>

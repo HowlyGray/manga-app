@@ -124,6 +124,21 @@ Sources declare what they support: `GET /api/sources` reports `hasTags` and
 `hasShelves`, and the UI hides genre browsing for a source that has no tag
 vocabulary rather than showing an empty picker.
 
+## Preview before downloading
+
+Opening a chapter no longer imports the title and downloads every page first.
+Anything not already on disk is **streamed from its source**: the reader shows
+the pages, and a banner offers to download the chapter when you decide to keep
+it. Nothing is written until you do — no title row, no chapter row, no files.
+
+That applies to any title, saved or not, so a series can be sampled straight
+from a search result. Downloading afterwards imports the title and adds the
+exact chapter you were reading, which matters because an import otherwise keeps
+only one chapter per number, in the language the OCR chain reads best.
+
+Translation is the one thing preview cannot do: the pipeline works on local
+files, so the control stays disabled until the chapter is downloaded.
+
 ## Cache
 
 Anything a source tells the app is kept, so browsing the same page twice costs
@@ -304,6 +319,7 @@ npm run sync -w server -- <command> [options]
 | `CACHE_TITLE_MS`        | `604800000`  | How long cached title metadata stays fresh (7 days)            |
 | `CACHE_CHAPTERS_MS`     | `3600000`    | How long a cached chapter index stays fresh (1 hour)           |
 | `CACHE_COVER_CONCURRENCY` | `6`        | Parallel cover downloads when a grid first loads               |
+| `CACHE_PAGES_MS`        | `600000`     | How long previewed page URLs stay usable (they expire upstream)|
 | `TRANSLATE_MIN_CONF`    | `55`         | Drop OCR lines below this confidence (0-100)                   |
 | `TRANSLATE_REFINE`      | `1`          | `0` disables the whole-balloon re-read pass                     |
 | `TRANSLATE_FONT`        | –            | Path to the font used for baked pages (a bold comic face)      |

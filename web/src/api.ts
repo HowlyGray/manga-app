@@ -104,6 +104,13 @@ export const api = {
     return request<ChapterDetailResponse>(`/api/library/${id}/chapters/${chapterId}`);
   },
 
+  /** Reads a chapter straight from its source, without saving it. */
+  previewChapter(id: string, chapterId: string) {
+    return request<ChapterDetailResponse>(
+      `/api/preview/${encodeURIComponent(id)}/${encodeURIComponent(chapterId)}`,
+    );
+  },
+
   downloadChapter(id: string, chapterId: string) {
     return request<{ started: boolean; message?: string }>(
       `/api/library/${id}/chapters/${chapterId}/download`,

@@ -141,6 +141,8 @@ export interface PageView {
 }
 
 export interface ChapterDetailResponse {
+  /** True when the pages stream from the source and nothing is stored. */
+  preview?: boolean;
   chapter: ChapterView & { downloading: boolean };
   pages: PageView[];
 }

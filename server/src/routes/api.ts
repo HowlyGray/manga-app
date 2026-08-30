@@ -353,17 +353,14 @@ apiRouter.get('/library/:id/chapters/:chapterId', (req, res) => {
 
 apiRouter.post('/library/:id/chapters/:chapterId/download', async (req, res) => {
   const { id, chapterId } = req.params;
-  if (!lib.getChapter(id, chapterId)) {
-    // Title not in library yet -> importing it also creates the chapter row.
-    if (!lib.getTitle(id)) {
-      try {
-        await ingest.importTitle(id);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[import ${id}] FAILED: ${message}`);
-        return res.status(502).json({ error: message });
-      }
-    }
+  try {
+    // Imports the title when needed and adds this exact chapter, which an
+    // import on its own may have filtered out in favour of another language.
+    await ingest.ensureChapter(id, chapterId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[import ${id}] FAILED: ${message}`);
+    return res.status(502).json({ error: message });
   }
   if (runningChapterDownloads.has(chapterId)) {
     return res.json({ started: false, message: 'already downloading' });
