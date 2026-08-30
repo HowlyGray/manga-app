@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import { useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { OverlayState } from '../hooks';
 import type { OverlayBlock } from '../types';
 
@@ -9,23 +9,32 @@ function withAlpha(fill: string, alpha: number): string {
   return m ? `rgba(${m[1]},${m[2]},${m[3]},${alpha})` : fill;
 }
 
-function blockStyle(block: OverlayBlock, width: number, height: number): CSSProperties {
+/**
+ * Places a block over the page.
+ *
+ * Position is a percentage of the page, so it follows the image at any size.
+ * Font size cannot be: it is given in original page pixels and has to be
+ * converted with the image's displayed width. That used to be `cqw` on a
+ * container-query container, which silently broke page mode — inline-size
+ * containment computes an element's width without looking at its contents, so
+ * a frame with no explicit width collapsed to zero and the page went blank.
+ */
+function blockStyle(block: OverlayBlock, overlayWidth: number, height: number, shown: number): CSSProperties {
+  const scale = shown / overlayWidth;
   const pct = (value: number, total: number) => `${(value / total) * 100}%`;
   return {
-    left: pct(block.rx0, width),
+    left: pct(block.rx0, overlayWidth),
     top: pct(block.ry0, height),
-    width: pct(block.rx1 - block.rx0, width),
+    width: pct(block.rx1 - block.rx0, overlayWidth),
     height: pct(block.ry1 - block.ry0, height),
-    // `cqw` is 1% of the frame's width, so the text scales with the image no
-    // matter how the page is displayed — the server's sizes are in page pixels.
-    fontSize: `${(block.fontSize / width) * 100}cqw`,
+    fontSize: `${block.fontSize * scale}px`,
     lineHeight: block.lineHeight / block.fontSize,
     color: block.color,
     // Bubbles need no background: the page underneath is already the erased
     // render, so a rectangle would only clip the balloon's curve. Text over
     // artwork was never erased, so it still rides on a translucent plate.
     background: block.inBubble ? 'transparent' : withAlpha(block.fill, 0.88),
-    borderRadius: block.inBubble ? 0 : `${(block.fontSize / width) * 40}cqw`,
+    borderRadius: block.inBubble ? 0 : `${block.fontSize * scale * 0.4}px`,
   };
 }
 
@@ -60,9 +69,33 @@ export default function PageFrame({
   onRequestOverlay,
   imgRef,
 }: Props) {
+  const [shownWidth, setShownWidth] = useState(0);
+  const img = useRef<HTMLImageElement | null>(null);
+
   useEffect(() => {
     if (onRequestOverlay) onRequestOverlay(pageNumber);
   }, [onRequestOverlay, pageNumber]);
+
+  // The overlay's font sizes are in page pixels, so they need the width the
+  // image is actually drawn at — which changes with the window and the mode.
+  const attach = useCallback(
+    (el: HTMLImageElement | null) => {
+      img.current = el;
+      imgRef?.(el);
+      if (el) setShownWidth(el.clientWidth);
+    },
+    [imgRef],
+  );
+
+  useEffect(() => {
+    const el = img.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      setShownWidth(entry.contentRect.width);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   const ready = overlay?.status === 'ready' ? overlay.overlay : null;
   // Swap to the erased render only once the text layer is there to replace it,
@@ -72,10 +105,11 @@ export default function PageFrame({
   return (
     <div className="page-frame">
       <img
-        ref={imgRef}
+        ref={attach}
         src={showClean ? cleanSrc : src}
         alt={alt}
         loading={lazy ? 'lazy' : undefined}
+        onLoad={(e) => setShownWidth(e.currentTarget.clientWidth)}
       />
 
       {overlay?.status === 'loading' && (
@@ -93,13 +127,13 @@ export default function PageFrame({
         </div>
       )}
 
-      {ready && !showOriginal && (
+      {ready && !showOriginal && shownWidth > 0 && (
         <div className="page-text-layer">
           {ready.blocks.map((block) => (
             <div
               key={block.id}
               className={`page-text${block.inBubble ? '' : ' on-art'}`}
-              style={blockStyle(block, ready.width, ready.height)}
+              style={blockStyle(block, ready.width, ready.height, shownWidth)}
               title={block.source}
             >
               <span>{block.text}</span>

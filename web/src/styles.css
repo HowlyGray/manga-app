@@ -575,8 +575,10 @@ a {
   overflow: hidden;
 }
 
+/* The frame shrink-wraps the image, so the text layer lines up with it. */
 .reader-pages.page .page-frame {
   max-width: 100%;
+  display: inline-block;
 }
 
 .reader-pages.page .page-frame img {
@@ -716,13 +718,13 @@ a {
 /* ---- page + translated text layer ---- */
 
 /*
- * `container-type: inline-size` makes 1cqw equal 1% of the displayed page
- * width, so the overlay's font sizes — which the server computes in original
- * page pixels — track the image at any zoom level.
+ * No size containment here. `container-type: inline-size` computes the
+ * element's width without looking at its contents, so in page mode — where the
+ * frame has no explicit width — it collapsed to zero and the reader went
+ * black. The overlay scales from the image's measured width instead.
  */
 .page-frame {
   position: relative;
-  container-type: inline-size;
   line-height: 0;
 }
 
