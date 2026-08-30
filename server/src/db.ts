@@ -119,7 +119,16 @@ export interface ChapterRow {
   local_path: string | null;
 }
 
+/**
+ * Makes a library id safe to use as a path segment. Ids from sources other than
+ * MangaDex carry a `provider:` prefix, and a colon is not a legal filename
+ * character on Windows. MangaDex UUIDs pass through unchanged.
+ */
+export function pathSegment(id: string): string {
+  return id.replace(/[^\w.-]+/g, '_');
+}
+
 /** Resolve the data subdirectory that holds a chapter's downloaded pages. */
 export function chapterDir(titleId: string, chapterId: string): string {
-  return path.join(dataDir, titleId, chapterId);
+  return path.join(dataDir, pathSegment(titleId), pathSegment(chapterId));
 }

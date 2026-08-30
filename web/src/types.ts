@@ -1,5 +1,7 @@
 export interface DiscoverItem {
   id: string;
+  /** Provider the result came from. */
+  source?: string;
   title: string;
   altTitles: string[];
   originalLanguage: string | null;
@@ -14,7 +16,14 @@ export interface DiscoverResponse {
   total: number;
   page: number;
   limit: number;
+  source: string;
   titles: DiscoverItem[];
+}
+
+export interface SourceInfo {
+  id: string;
+  label: string;
+  browsable: boolean;
 }
 
 export interface LibraryTitle {

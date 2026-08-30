@@ -6,7 +6,9 @@
  * for everyone else. That keeps ids unique across providers without a
  * migration, and `decodeId` tells the ingest and download paths who to ask.
  */
+import { config } from '../config';
 import { mangadexProvider } from './mangadex';
+import { weebcentralProvider } from './weebcentral';
 import type { SourceProvider } from './types';
 
 export * from './types';
@@ -16,6 +18,7 @@ export { mainTitle, synopsisEn } from './mangadex';
 export const DEFAULT_SOURCE = 'mangadex';
 
 const registry = new Map<string, SourceProvider>([[mangadexProvider.id, mangadexProvider]]);
+if (config.weebcentral.enabled) registry.set(weebcentralProvider.id, weebcentralProvider);
 
 /** Registers a provider. Call at startup, before any request is served. */
 export function registerProvider(provider: SourceProvider): void {

@@ -23,6 +23,11 @@ export const config = {
   jikan: {
     apiIntervalMs: Number(process.env.JIKAN_API_MS ?? 380),
   },
+  weebcentral: {
+    // Secondary source, used mostly for series MangaDex no longer carries.
+    enabled: (process.env.WEEBCENTRAL ?? '1') !== '0',
+    intervalMs: Number(process.env.WEEBCENTRAL_MS ?? 700),
+  },
   translate: {
     // DeepL — set DEEPL_API_KEY (free keys typically end in ':fx').
     deeplApiKey: process.env.DEEPL_API_KEY ?? undefined,

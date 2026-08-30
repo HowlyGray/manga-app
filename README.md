@@ -91,6 +91,18 @@ migration, and any row can be traced back to the source that produced it.
 `GET /api/sources` lists what is registered; `GET /api/discover?source=<id>`
 searches one of them.
 
+Two are built in:
+
+| Source | Notes |
+| --- | --- |
+| **MangaDex** | Public API, many languages. Lost 700+ series and over a quarter of its chapters to publisher DMCA notices in 2025, so a title can be listed with no readable chapters left. |
+| **WeebCentral** | HTML, English only — which is also the language the OCR chain reads best. Useful precisely for the series MangaDex no longer carries. Set `WEEBCENTRAL=0` to disable. |
+
+WeebCentral has no API, so its provider parses HTML. Every pattern is anchored
+on a structural landmark rather than on styling, and a page that fails to parse
+yields an empty result instead of throwing — but it is scraping, and scraping
+breaks when a site is redesigned.
+
 To add a source, implement `SourceProvider` under `server/src/sources/` and
 register it in `server/src/sources/index.ts`.
 
@@ -201,6 +213,8 @@ npm run sync -w server -- <command> [options]
 | `MDX_IMAGE_CONCURRENCY` | `3`          | Parallel image downloads                                       |
 | `MDX_QUALITY`           | `original`   | `original` or `data-saver`                                      |
 | `JIKAN_API_MS`          | `380`        | Jikan (MyAnimeList) request interval (ms)                      |
+| `WEEBCENTRAL`           | `1`          | `0` removes the WeebCentral source                             |
+| `WEEBCENTRAL_MS`        | `700`        | WeebCentral request interval (ms)                              |
 | `ANTHROPIC_API_KEY`     | –            | Enables whole-page, context-aware translation with Claude      |
 | `TRANSLATE_LLM`         | `1`          | `0` disables the Claude provider even when a key is set        |
 | `TRANSLATE_LLM_MODEL`   | `claude-opus-5` | Model used for translation                                  |
@@ -236,7 +250,8 @@ The repository itself contains only source; `node_modules/`, `data/`,
 
 ## Credits
 
-- [MangaDex](https://mangadex.org) API and [Jikan](https://jikan.moe) (MAL)
+- [MangaDex](https://mangadex.org) API, [WeebCentral](https://weebcentral.com)
+  and [Jikan](https://jikan.moe) (MAL)
 - [manga-ocr](https://github.com/kha-white/manga-ocr) by kha-white (ONNX build
   by [mayocream](https://huggingface.co/mayocream/manga-ocr-onnx))
 - [RapidOCR](https://github.com/RapidAI/RapidOCR)

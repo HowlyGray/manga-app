@@ -48,8 +48,8 @@ export default function App() {
         <a href="https://mangadex.org" target="_blank" rel="noreferrer">
           MangaDex
         </a>{' '}
-        via its public API — fan translations and scanlation groups are credited per chapter. This
-        is a non-commercial, ad-free personal library app.
+        and other configured sources — fan translations and scanlation groups are credited per
+        chapter. This is a non-commercial, ad-free personal library app.
       </footer>
     </div>
   );

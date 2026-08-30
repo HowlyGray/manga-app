@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import type { DiscoverItem } from '../types';
+import type { DiscoverItem, SourceInfo } from '../types';
 import TitleCard from '../components/TitleCard';
 import { useDebounce } from '../hooks';
 
@@ -11,6 +11,8 @@ const LANGS = [
 ];
 
 export default function Discover() {
+  const [sources, setSources] = useState<SourceInfo[]>([]);
+  const [source, setSource] = useState('');
   const [q, setQ] = useState('');
   const debouncedQ = useDebounce(q, 400);
   const [lang, setLang] = useState('');
@@ -23,11 +25,22 @@ export default function Discover() {
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
+    api.sources().then(
+      (r) => {
+        setSources(r.sources);
+        // Select the first source so the dropdown and the request agree.
+        setSource((current) => current || r.sources[0]?.id || '');
+      },
+      () => setSources([]),
+    );
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError('');
     api
-      .discover({ q: debouncedQ, lang, page: 1, limit: 30 })
+      .discover({ q: debouncedQ, lang, source, page: 1, limit: 30 })
       .then((res) => {
         if (cancelled) return;
         setItems(res.titles);
@@ -39,12 +52,12 @@ export default function Discover() {
     return () => {
       cancelled = true;
     };
-  }, [debouncedQ, lang]);
+  }, [debouncedQ, lang, source]);
 
   async function loadMore() {
     setLoading(true);
     try {
-      const res = await api.discover({ q: debouncedQ, lang, page: page + 1, limit: 30 });
+      const res = await api.discover({ q: debouncedQ, lang, source, page: page + 1, limit: 30 });
       setItems((prev) => [...prev, ...res.titles]);
       setPage(res.page);
       setTotal(res.total);
@@ -78,6 +91,20 @@ export default function Discover() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
+        {sources.length > 1 && (
+          <select
+            className="chip"
+            value={source}
+            onChange={(e) => setSource(e.target.value)}
+            title="Where to search for titles"
+          >
+            {sources.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        )}
         <div className="chips">
           {LANGS.map((l) => (
             <button

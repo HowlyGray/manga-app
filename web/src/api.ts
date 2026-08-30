@@ -6,7 +6,7 @@ import type {
   Progress,
   TitleDetailResponse,
 } from './types';
-import type { ChapterTranslateState, PageOverlay, TranslateLanguages } from './types';
+import type { ChapterTranslateState, PageOverlay, SourceInfo, TranslateLanguages } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -27,10 +27,15 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  discover(params: { q?: string; lang?: string; page?: number; limit?: number } = {}) {
+  sources() {
+    return request<{ sources: SourceInfo[] }>('/api/sources');
+  },
+
+  discover(params: { q?: string; lang?: string; source?: string; page?: number; limit?: number } = {}) {
     const s = new URLSearchParams();
     if (params.q) s.set('q', params.q);
     if (params.lang) s.set('lang', params.lang);
+    if (params.source) s.set('source', params.source);
     s.set('page', String(params.page ?? 1));
     s.set('limit', String(params.limit ?? 24));
     return request<DiscoverResponse>(`/api/discover?${s.toString()}`);
@@ -44,10 +49,10 @@ export const api = {
     return request<TitleDetailResponse>(`/api/library/${id}`);
   },
 
-  importTitle(mangadexId: string) {
-    return request<{ id: string; title: string; chaptersImported: number; score: number | null }>(
+  importTitle(id: string) {
+    return request<{ id: string; source: string; title: string; chaptersImported: number; score: number | null }>(
       '/api/library/import',
-      { method: 'POST', body: JSON.stringify({ mangadexId }) },
+      { method: 'POST', body: JSON.stringify({ id }) },
     );
   },
 

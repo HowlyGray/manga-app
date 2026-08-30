@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { coverDir, config } from '../config';
+import { pathSegment } from '../db';
 import { searchMangaMeta } from '../api/jikan';
 import * as lib from './library';
 import { downloadChapter } from '../downloader';
@@ -37,8 +38,7 @@ export async function discover(
 async function downloadCover(libraryId: string, url: string): Promise<string | null> {
   if (!url) return null;
   const ext = path.extname(new URL(url).pathname) || '.jpg';
-  // Library ids may carry a `provider:` prefix, which is not a legal filename.
-  const local = path.join(coverDir, `${libraryId.replace(/[^\w.-]+/g, '_')}${ext}`);
+  const local = path.join(coverDir, `${pathSegment(libraryId)}${ext}`);
   try {
     const res = await getProvider(decodeId(libraryId).provider).fetchImage({ url });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
