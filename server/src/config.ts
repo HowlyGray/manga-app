@@ -6,6 +6,9 @@ const appRoot = path.resolve(serverDir, '..', '..');
 
 export const config = {
   port: Number(process.env.PORT ?? 5180),
+  // Bind every interface so phones and tablets on the same network can reach
+  // the app. Set HOST=127.0.0.1 to keep it to this machine.
+  host: process.env.HOST ?? '0.0.0.0',
   dataDir: process.env.DATA_DIR
     ? path.resolve(process.env.DATA_DIR)
     : path.join(appRoot, 'data'),

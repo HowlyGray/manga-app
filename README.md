@@ -207,6 +207,46 @@ npm start -w server  # serves API + web/dist on PORT (default 5180)
 
 Open http://localhost:5180.
 
+## Reading on your phone or tablet
+
+Build once and serve everything from the API port:
+
+```bash
+npm run serve
+```
+
+The console prints the address to open on the other device:
+
+```
+Manga app server listening on http://localhost:5180
+  on this network:  http://192.168.1.42:5180
+```
+
+`npm run dev` exposes the Vite server on the network the same way, on port 5173.
+Both bind every interface by default; set `HOST=127.0.0.1` to keep the app on
+this machine only.
+
+**On Windows the firewall blocks this until you allow the port.** Inbound
+connections are denied by default and no rule exists for Node, so the phone will
+simply time out. In an **Administrator** PowerShell:
+
+```powershell
+New-NetFirewallRule -DisplayName "Manga app" -Direction Inbound -Protocol TCP -LocalPort 5180 -Action Allow -Profile Private
+```
+
+Add `-LocalPort 5180,5173` instead if you also want the dev server reachable.
+Keep it to `-Profile Private`: on a public network that rule would expose the
+app to strangers. To undo it later:
+
+```powershell
+Remove-NetFirewallRule -DisplayName "Manga app"
+```
+
+**The app has no authentication.** Anyone on the same network who opens the
+address gets full access — including the ability to download and delete-by-
+overwrite through the API. That is fine for a home network and not fine for a
+shared or public one.
+
 ## CLI sync tool
 
 ```bash
@@ -224,6 +264,7 @@ npm run sync -w server -- <command> [options]
 | Variable                | Default      | Description                                                    |
 | ----------------------- | ------------ | -------------------------------------------------------------- |
 | `PORT`                  | `5180`       | HTTP port for the server                                       |
+| `HOST`                  | `0.0.0.0`    | Bind address; `127.0.0.1` keeps the app off the network        |
 | `DATA_DIR`              | `./data`     | SQLite database location (`library.db`)                        |
 | `LIBRARY_DIR`           | `./library`  | Downloaded pages and covers                                    |
 | `MDX_API_MS`            | `260`        | MangaDex API request interval (ms)                             |

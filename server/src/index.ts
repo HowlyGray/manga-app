@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { config } from './config';
 import { getDb } from './db';
@@ -25,9 +26,25 @@ app.use((req, res) => {
   res.status(404).json({ error: `not found: ${req.method} ${req.path}` });
 });
 
-app.listen(config.port, () => {
+/** Non-loopback IPv4 addresses, so the console can print reachable URLs. */
+function lanAddresses(): string[] {
+  return Object.values(os.networkInterfaces())
+    .flatMap((entries) => entries ?? [])
+    .filter((entry) => entry.family === 'IPv4' && !entry.internal)
+    .map((entry) => entry.address);
+}
+
+app.listen(config.port, config.host, () => {
   getDb();
   console.log(`Manga app server listening on http://localhost:${config.port}`);
+  if (config.host === '0.0.0.0') {
+    // Printing the address is the whole point: on another device you need the
+    // machine's IP, and there is no way to guess which interface is the right
+    // one from the phone.
+    for (const address of lanAddresses()) {
+      console.log(`  on this network:  http://${address}:${config.port}`);
+    }
+  }
   console.log(`  library: ${config.libraryDir}`);
   console.log(`  db:      ${config.dataDir}`);
 });

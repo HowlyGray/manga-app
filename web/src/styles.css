@@ -70,6 +70,7 @@ a {
 .brand {
   font-weight: 800;
   font-size: 1.05rem;
+  white-space: nowrap;
 }
 
 .nav {
@@ -1054,4 +1055,48 @@ a {
 
 a.chip {
   display: inline-block;
+}
+
+/* ---- small screens ---- */
+
+@media (max-width: 640px) {
+  .topbar-inner {
+    gap: 12px;
+    padding: 10px 14px;
+  }
+
+  .content {
+    padding: 16px 14px 48px;
+  }
+
+  /*
+   * The sticky filter bar is calibrated to the desktop header height, and on a
+   * phone it costs a third of the viewport anyway — let it scroll away.
+   */
+  .filterbar {
+    position: static;
+    margin: 0 0 14px;
+    padding: 0;
+    background: none;
+    backdrop-filter: none;
+  }
+
+  .hero-title {
+    font-size: 1.25rem;
+  }
+
+  .grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 12px;
+  }
+
+  .rail-item {
+    flex: 0 0 132px;
+  }
+
+  /* Give the reader's page-turn zones the full height on touch. */
+  .reader-pages.page .click-left,
+  .reader-pages.page .click-right {
+    width: 38%;
+  }
 }
