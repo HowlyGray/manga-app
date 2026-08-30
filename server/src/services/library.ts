@@ -33,6 +33,7 @@ export interface LibraryTitle extends TitleRecord {
 
 export interface ChapterRecord {
   id: string;
+  provider: string;
   provider_id: string;
   title_id: string;
   chapter_number: string | null;
@@ -80,6 +81,7 @@ function rowToTitle(row: Record<string, unknown>): TitleRecord {
 function rowToChapter(row: Record<string, unknown>): ChapterRecord {
   return {
     id: row.id as string,
+    provider: (row.provider as string) ?? 'mangadex',
     provider_id: row.provider_id as string,
     title_id: row.title_id as string,
     chapter_number: (row.chapter_number as string) ?? null,
@@ -204,6 +206,7 @@ export function listLibrary(): LibraryTitle[] {
 
 export function upsertChapter(ch: {
   id: string;
+  provider?: string;
   providerId: string;
   titleId: string;
   chapterNumber: string | null;
@@ -219,7 +222,7 @@ export function upsertChapter(ch: {
   db.prepare(
     `INSERT INTO chapters (id, provider, provider_id, title_id, chapter_number, chapter_title,
      volume, language, pages, external_url, published_at, scanlator)
-     VALUES (@id, 'mangadex', @provider_id, @title_id, @chapter_number, @chapter_title,
+     VALUES (@id, @provider, @provider_id, @title_id, @chapter_number, @chapter_title,
              @volume, @language, @pages, @external_url, @published_at, @scanlator)
      ON CONFLICT(id) DO UPDATE SET
        chapter_number = excluded.chapter_number,
@@ -233,6 +236,7 @@ export function upsertChapter(ch: {
        updated_at = datetime('now')`,
   ).run({
     id: ch.id,
+    provider: ch.provider ?? 'mangadex',
     provider_id: ch.providerId,
     title_id: ch.titleId,
     chapter_number: ch.chapterNumber,

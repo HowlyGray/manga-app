@@ -7,6 +7,7 @@ import * as lib from '../services/library';
 import * as imgtranslator from '../services/imgtranslate';
 import { isLlmConfigured } from '../services/translator';
 import { langSpec } from '../services/lang';
+import { hasProvider, listProviders } from '../sources';
 import { downloadChapter } from '../downloader';
 import { getChapterTranslateStatus, startChapterTranslate } from '../services/chapterTranslate';
 
@@ -40,26 +41,48 @@ apiRouter.get('/ping', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
+/** Content sources the server can browse. */
+apiRouter.get('/sources', (_req, res) => {
+  res.json({
+    sources: listProviders().map((p) => ({ id: p.id, label: p.label, browsable: p.browsable })),
+  });
+});
+
 apiRouter.get('/discover', async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q : undefined;
   const lang = typeof req.query.lang === 'string' && LANGS.includes(req.query.lang) ? req.query.lang : undefined;
+  const source = typeof req.query.source === 'string' ? req.query.source : undefined;
+  if (source && !hasProvider(source)) {
+    return res.status(400).json({ error: `unknown source: ${source}` });
+  }
   const page = Math.max(1, Number(req.query.page ?? 1) || 1);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 24) || 24));
-  const { titles, total } = await ingest.discover({ q, lang, limit, offset: (page - 1) * limit });
+  let result: Awaited<ReturnType<typeof ingest.discover>>;
+  try {
+    result = await ingest.discover({ q, lang, limit, offset: (page - 1) * limit, source });
+  } catch (err) {
+    // Without this the default Express handler answers an HTML error page to a
+    // JSON endpoint, and the client reports a parse error instead of the cause.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[discover] FAILED: ${message}`);
+    return res.status(502).json({ error: message });
+  }
   res.json({
-    total,
+    total: result.total,
     page,
     limit,
-    titles: titles.map((t) => ({
-      id: t.id,
-      title: ingest.mainTitle(t),
+    source: result.source,
+    titles: result.titles.map((t) => ({
+      id: t.libraryId,
+      source: result.source,
+      title: t.title,
       altTitles: t.altTitles.slice(0, 5),
-      originalLanguage: t.originalLanguage,
+      originalLanguage: t.originalLang,
       year: t.year,
       status: t.status,
-      tags: t.tags.map((tg) => tg.name).slice(0, 6),
+      tags: t.tags.slice(0, 6),
       coverUrl: t.coverUrl,
-      isSaved: lib.getTitle(t.id) != null,
+      isSaved: lib.getTitle(t.libraryId) != null,
     })),
   });
 });
@@ -81,7 +104,7 @@ apiRouter.get('/library/:id', async (req, res) => {
         coverUrl: remote.coverUrl,
         title: {
           id: remote.id,
-          provider: 'mangadex',
+          provider: remote.source,
           provider_id: remote.id,
           title: remote.title,
           alt_titles: remote.altTitles,
@@ -156,9 +179,12 @@ apiRouter.get('/library/:id', async (req, res) => {
 });
 
 apiRouter.post('/library/import', async (req, res) => {
-  const { mangadexId } = req.body ?? {};
+  // `mangadexId` predates multiple sources; `id` is the current spelling and
+  // carries a `provider:` prefix for anything that is not MangaDex.
+  const raw = req.body ?? {};
+  const mangadexId: unknown = raw.id ?? raw.mangadexId;
   if (!mangadexId || typeof mangadexId !== 'string') {
-    return res.status(400).json({ error: 'mangadexId required' });
+    return res.status(400).json({ error: 'id required' });
   }
   try {
     const result = await ingest.importTitle(mangadexId);

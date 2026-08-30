@@ -1,59 +1,54 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { coverDir, config } from '../config';
-import { coverThumbUrl, downloadImage, getManga, listChapters, searchManga, type MangaDexChapter, type MangaDexTitle, type SearchMangaParams } from '../api/mangadex';
 import { searchMangaMeta } from '../api/jikan';
 import * as lib from './library';
 import { downloadChapter } from '../downloader';
 import { languageRanker } from './lang';
+import {
+  decodeId,
+  encodeId,
+  getProvider,
+  type SourceChapter,
+  type SourceProvider,
+  type SourceSearch,
+  type SourceTitle,
+} from '../sources';
 
-const MAIN_KEYS = ['en', 'ja-ro', 'ko', 'ja', 'pt-br', 'es'];
+export { mainTitle, synopsisEn } from '../sources';
 
-export function mainTitle(t: MangaDexTitle): string {
-  for (const k of MAIN_KEYS) {
-    const v = t.titles[k];
-    if (v) return v;
-  }
-  const v = Object.values(t.titles)[0];
-  return v ?? 'Untitled';
-}
-
-export function synopsisEn(t: MangaDexTitle): string {
-  return t.description['en'] ?? t.description['ja'] ?? '';
+export interface DiscoverParams extends SourceSearch {
+  /** Provider key; defaults to MangaDex. */
+  source?: string;
 }
 
 export async function discover(
-  params: SearchMangaParams,
-): Promise<{ total: number; titles: (MangaDexTitle & { coverUrl: string | null })[] }> {
-  const { titles, total } = await searchManga(params);
+  params: DiscoverParams,
+): Promise<{ total: number; source: string; titles: (SourceTitle & { libraryId: string })[] }> {
+  const provider = getProvider(params.source);
+  const { titles, total } = await provider.search(params);
   return {
     total,
-    titles: titles.map((t) => ({
-      ...t,
-      coverUrl: coverThumbUrl(t.id, t.coverFileName, 256),
-    })),
+    source: provider.id,
+    titles: titles.map((t) => ({ ...t, libraryId: encodeId(provider.id, t.id) })),
   };
 }
 
-async function downloadCover(mangadexId: string, fileName: string): Promise<string | null> {
-  const url = coverThumbUrl(mangadexId, fileName, 512);
+async function downloadCover(libraryId: string, url: string): Promise<string | null> {
   if (!url) return null;
-  const ext = path.extname(fileName) || '.jpg';
-  const local = path.join(coverDir, `${mangadexId}${ext}`);
+  const ext = path.extname(new URL(url).pathname) || '.jpg';
+  // Library ids may carry a `provider:` prefix, which is not a legal filename.
+  const local = path.join(coverDir, `${libraryId.replace(/[^\w.-]+/g, '_')}${ext}`);
   try {
-    await imageFromUrl(url, local);
+    const res = await getProvider(decodeId(libraryId).provider).fetchImage({ url });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    fs.mkdirSync(path.dirname(local), { recursive: true });
+    fs.writeFileSync(local, buf);
     return local;
   } catch {
     return null;
   }
-}
-
-async function imageFromUrl(url: string, localPath: string): Promise<void> {
-  const res = await downloadImage(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  fs.mkdirSync(path.dirname(localPath), { recursive: true });
-  fs.writeFileSync(localPath, buf);
 }
 
 export interface RemoteChapter {
@@ -69,6 +64,7 @@ export interface RemoteChapter {
 
 export interface RemoteTitleDetail {
   id: string;
+  source: string;
   title: string;
   altTitles: string[];
   originalLang: string | null;
@@ -83,33 +79,42 @@ export interface RemoteTitleDetail {
   chapters: { total: number; items: RemoteChapter[] };
 }
 
-/**
- * Fetches a title's metadata and chapter index directly from MangaDex without
- * touching the local library. Used to browse titles that aren't saved yet.
- */
-export async function remoteTitleDetail(mangadexId: string): Promise<RemoteTitleDetail> {
-  const t = await getManga(mangadexId);
-  if (!t) throw new Error('title not found on MangaDex');
-
-  const chapters = await listChapters(mangadexId, { sort: 'asc' });
-
+/** Chapter languages present, ordered by how well the OCR chain reads them. */
+function languagesOf(chapters: SourceChapter[]): string[] {
   const counts = new Map<string, number>();
   for (const c of chapters) counts.set(c.language, (counts.get(c.language) ?? 0) + 1);
-  const languages = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([l]) => l);
+  const rank = languageRanker(config.translate.chapterLanguages);
+  return [...counts.entries()]
+    .sort((a, b) => rank(a[0]) - rank(b[0]) || b[1] - a[1])
+    .map(([language]) => language);
+}
+
+/**
+ * Fetches a title's metadata and chapter index straight from its source,
+ * without touching the local library. Used to browse titles not saved yet.
+ */
+export async function remoteTitleDetail(libraryId: string): Promise<RemoteTitleDetail> {
+  const { provider: source, providerId } = decodeId(libraryId);
+  const provider = getProvider(source);
+
+  const t = await provider.getTitle(providerId);
+  if (!t) throw new Error(`title not found on ${provider.label}`);
+  const chapters = await provider.listChapters(providerId);
 
   return {
-    id: mangadexId,
-    title: mainTitle(t),
+    id: libraryId,
+    source: provider.id,
+    title: t.title,
     altTitles: t.altTitles,
-    originalLang: t.originalLanguage,
-    synopsis: synopsisEn(t) || null,
+    originalLang: t.originalLang,
+    synopsis: t.synopsis,
     status: t.status,
     year: t.year,
-    author: t.author ?? t.artist,
+    author: t.author,
     contentRating: t.contentRating,
-    tags: t.tags.map((tg) => tg.name),
-    coverUrl: coverThumbUrl(mangadexId, t.coverFileName, 512),
-    languages,
+    tags: t.tags,
+    coverUrl: t.coverUrl,
+    languages: languagesOf(chapters),
     chapters: {
       total: chapters.length,
       items: chapters.map((c) => ({
@@ -120,7 +125,7 @@ export async function remoteTitleDetail(mangadexId: string): Promise<RemoteTitle
         language: c.language,
         pages: c.pages,
         scanlator: c.scanlator,
-        publishedAt: c.publishAt,
+        publishedAt: c.publishedAt,
       })),
     },
   };
@@ -128,6 +133,7 @@ export async function remoteTitleDetail(mangadexId: string): Promise<RemoteTitle
 
 export interface ImportResult {
   id: string;
+  source: string;
   title: string;
   chaptersImported: number;
   score: number | null;
@@ -137,54 +143,53 @@ export interface ImportResult {
  * Adds a title and its chapter index to the local library. Also downloads the
  * cover locally and enriches metadata via Jikan (best effort).
  */
-export async function importTitle(mangadexId: string): Promise<ImportResult> {
-  const t = await getManga(mangadexId);
-  if (!t) throw new Error(`manga ${mangadexId} not found on MangaDex`);
+export async function importTitle(libraryId: string): Promise<ImportResult> {
+  const { provider: source, providerId } = decodeId(libraryId);
+  const provider = getProvider(source);
 
-  const title = mainTitle(t);
-  const coverLocal = t.coverFileName ? await downloadCover(mangadexId, t.coverFileName) : null;
+  const t = await provider.getTitle(providerId);
+  if (!t) throw new Error(`${providerId} not found on ${provider.label}`);
+
+  const id = encodeId(provider.id, providerId);
+  const coverLocal = t.coverUrl ? await downloadCover(id, t.coverUrl) : null;
 
   lib.upsertTitle({
-    id: mangadexId,
-    providerId: mangadexId,
-    title,
+    id,
+    provider: provider.id,
+    providerId,
+    title: t.title,
     altTitles: t.altTitles,
-    originalLang: t.originalLanguage,
-    synopsis: synopsisEn(t) || null,
+    originalLang: t.originalLang,
+    synopsis: t.synopsis,
     status: t.status,
     year: t.year,
-    author: t.author ?? t.artist,
+    author: t.author,
     contentRating: t.contentRating,
-    tags: t.tags.map((tg) => tg.name),
+    tags: t.tags,
     coverLocal,
   });
 
-  const chapters = await listChapters(mangadexId, { sort: 'asc' });
-  for (const c of chapters) {
-    upsertChapterForTitle(mangadexId, c);
-  }
+  const chapters = await provider.listChapters(providerId);
+  for (const c of chapters) upsertChapterForTitle(provider, id, c);
 
   let score: number | null = null;
   try {
-    const meta = await searchMangaMeta(title);
+    const meta = await searchMangaMeta(t.title);
     if (meta) {
       score = meta.score;
-      lib.setTitleJikanMetadata(mangadexId, {
-        malId: meta.malId,
-        score,
-        payload: JSON.stringify(meta),
-      });
+      lib.setTitleJikanMetadata(id, { malId: meta.malId, score, payload: JSON.stringify(meta) });
     }
   } catch {
     // enrichment is best-effort
   }
 
-  return { id: mangadexId, title, chaptersImported: chapters.length, score };
+  return { id, source: provider.id, title: t.title, chaptersImported: chapters.length, score };
 }
 
-function upsertChapterForTitle(titleId: string, c: MangaDexChapter): void {
+function upsertChapterForTitle(provider: SourceProvider, titleId: string, c: SourceChapter): void {
   lib.upsertChapter({
-    id: c.id,
+    id: encodeId(provider.id, c.id),
+    provider: provider.id,
     providerId: c.id,
     titleId,
     chapterNumber: c.chapter,
@@ -193,7 +198,7 @@ function upsertChapterForTitle(titleId: string, c: MangaDexChapter): void {
     language: c.language,
     pages: c.pages,
     externalUrl: c.externalUrl,
-    publishedAt: c.publishAt,
+    publishedAt: c.publishedAt,
     scanlator: c.scanlator,
   });
 }

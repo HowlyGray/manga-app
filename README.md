@@ -78,6 +78,22 @@ the layout JSON and rendered PNGs), so nothing is re-translated unless you clear
 the cache. Cache names carry a pipeline version; after an upgrade the old files
 are simply ignored, and `.trl/` can be deleted at any time.
 
+## Sources
+
+MangaDex is one provider behind a common interface rather than the only way in.
+A provider supplies search, title metadata, a chapter index, and the page images
+of a chapter (`server/src/sources/types.ts`); everything else in the app works
+in those terms and never learns where a page came from.
+
+Library ids stay bare for MangaDex (`<uuid>`) and carry a `provider:` prefix for
+everyone else (`comick:abc`), so ids are unique across providers with no
+migration, and any row can be traced back to the source that produced it.
+`GET /api/sources` lists what is registered; `GET /api/discover?source=<id>`
+searches one of them.
+
+To add a source, implement `SourceProvider` under `server/src/sources/` and
+register it in `server/src/sources/index.ts`.
+
 ## Chapter language preference
 
 A series often exists in several fan translations, and which one you download

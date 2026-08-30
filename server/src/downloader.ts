@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config';
 import { chapterDir } from './db';
-import { downloadImage, getAtHomeServer } from './api/mangadex';
+import { getProvider } from './sources';
 import {
   getChapter,
   markPageDownloaded,
@@ -46,17 +46,16 @@ export async function downloadChapter(
   const ch = getChapter(titleId, chapterId);
   if (!ch) throw new Error(`chapter ${chapterId} not found in library`);
 
-  const atHome = await getAtHomeServer(ch.provider_id);
-  if (!atHome) throw new Error('unable to reach at-home server for chapter');
-
-  const useSaver = config.mangadex.quality === 'data-saver';
-  const files = useSaver ? atHome.dataSaverFiles : atHome.files;
-  if (files.length === 0) {
+  const provider = getProvider(ch.provider);
+  const images = await provider.chapterPages(ch.provider_id);
+  if (images.length === 0) {
     setChapterDownloaded(chapterId, 1, null);
     return { ok: true, downloaded: 0, failed: 0 };
   }
 
-  replaceChapterPages(chapterId, files.length, files);
+  // The page list is stored by file name so a partial download can resume.
+  const names = images.map((img, i) => path.basename(new URL(img.url).pathname) || `${i + 1}`);
+  replaceChapterPages(chapterId, images.length, names);
 
   const dir = chapterDir(titleId, chapterId);
   fs.mkdirSync(dir, { recursive: true });
@@ -65,14 +64,13 @@ export async function downloadChapter(
   let failed = 0;
   const errors: string[] = [];
 
-  await mapLimit(files, config.mangadex.imageConcurrency, async (file, index) => {
+  await mapLimit(images, config.mangadex.imageConcurrency, async (image, index) => {
     const pageNumber = index + 1;
-    const ext = path.extname(file) || '.jpg';
+    const ext = path.extname(names[index]) || '.jpg';
     const localPath = path.join(dir, `${String(pageNumber).padStart(4, '0')}${ext}`);
     try {
       await imageLimiter.run(async () => {
-        const url = `${atHome.baseUrl}/data/${atHome.hash}${useSaver ? '/data-saver' : ''}/${file}`;
-        const res = await downloadImage(url);
+        const res = await provider.fetchImage(image);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const buf = Buffer.from(await res.arrayBuffer());
         fs.writeFileSync(localPath, buf);
@@ -82,7 +80,7 @@ export async function downloadChapter(
       downloaded++;
     } catch (err) {
       failed++;
-      errors.push(`${file}: ${err instanceof Error ? err.message : String(err)}`);
+      errors.push(`${names[index]}: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 
