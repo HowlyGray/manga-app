@@ -44,6 +44,8 @@ export interface ChapterView {
   title: string | null;
   volume: string | null;
   language: string;
+  /** Human-readable name of the language printed on the pages. */
+  languageLabel?: string;
   pages: number | null;
   scanlator: string | null;
   publishedAt: string | null;
@@ -117,4 +119,48 @@ export interface ChapterTranslateState {
   failed: number;
   pages: ChapterTranslatePage[];
   error?: string;
+}
+/** One speech bubble, positioned in the original page's pixel coordinates. */
+export interface OverlayBlock {
+  id: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  /** Layout box: the bubble interior when one was detected. */
+  rx0: number;
+  ry0: number;
+  rx1: number;
+  ry1: number;
+  /** Recognized source text, shown on hover. */
+  source: string;
+  text: string;
+  vertical: boolean;
+  inBubble: boolean;
+  fill: string;
+  color: string;
+  fontSize: number;
+  lineHeight: number;
+  lines: string[];
+}
+
+export interface PageOverlay {
+  v: number;
+  width: number;
+  height: number;
+  sourceLang: string;
+  sourceLabel: string;
+  targetLang: string;
+  engine: string;
+  provider: 'claude' | 'deepl' | 'google' | 'none';
+  translated: boolean;
+  reason?: 'same-language' | 'no-text';
+  blocks: OverlayBlock[];
+}
+
+export interface TranslateLanguages {
+  targets: string[];
+  defaultSource: string;
+  /** A context-aware LLM provider is configured server-side. */
+  llm: boolean;
 }

@@ -1,7 +1,16 @@
 import { config } from '../config';
+import { isSameLanguage, langSpec } from './lang';
 
 const freeUrl = 'https://api-free.deepl.com';
 const proUrl = 'https://api.deepl.com';
+
+export type Provider = 'claude' | 'deepl' | 'google' | 'none';
+
+export interface TranslationResult {
+  provider: Provider;
+  /** 1:1 with the input array. */
+  texts: string[];
+}
 
 function deeplBaseUrl(): string {
   const url = config.translate.deeplUrl;
@@ -10,22 +19,116 @@ function deeplBaseUrl(): string {
   return key.endsWith(':fx') ? freeUrl : proUrl;
 }
 
-export interface TranslationResult {
-  provider: 'deepl' | 'google';
-  lines: string[];
+/** Memo across pages: repeated SFX and stock phrases are translated once. */
+const memo = new Map<string, string>();
+
+function memoKey(target: string, text: string): string {
+  return `${target}\u0000${text}`;
 }
 
-const lineCache = new Map<string, string>();
+// ---------------------------------------------------------------------------
+// Claude — context-aware, whole page in one call
+// ---------------------------------------------------------------------------
 
-async function deeplTranslate(lines: string[], targetLang: string, sourceLang: string): Promise<string[]> {
+let anthropicClient: unknown | null = null;
+
+export function isLlmConfigured(): boolean {
+  return config.translate.llm.enabled && Boolean(config.translate.llm.apiKey);
+}
+
+/**
+ * Translates every bubble of a page in a single request so the model can use
+ * neighbouring bubbles as context. This is what fixes pronouns, sentence flow
+ * and manga register — a per-bubble MT call cannot see any of that.
+ */
+async function claudeTranslate(
+  texts: string[],
+  targetLang: string,
+  sourceLabel: string,
+): Promise<string[] | null> {
+  const { default: Anthropic } = await import('@anthropic-ai/sdk');
+  const { zodOutputFormat } = await import('@anthropic-ai/sdk/helpers/zod');
+  const { z } = await import('zod');
+
+  if (!anthropicClient) {
+    anthropicClient = new Anthropic({ apiKey: config.translate.llm.apiKey });
+  }
+  const client = anthropicClient as InstanceType<typeof Anthropic>;
+
+  const schema = z.object({
+    translations: z.array(
+      z.object({
+        id: z.number(),
+        text: z.string(),
+      }),
+    ),
+  });
+
+  const numbered = texts.map((t, i) => `${i}\t${t}`).join('\n');
+  const targetName = langSpec(targetLang.toLowerCase()).label;
+
+  const response = await client.messages.parse({
+    model: config.translate.llm.model,
+    max_tokens: 8000,
+    output_config: {
+      effort: config.translate.llm.effort,
+      format: zodOutputFormat(schema),
+    },
+    system:
+      'You translate comic and manga speech bubbles. You receive every text ' +
+      'block of one page, in reading order, as `id<TAB>text` lines. Return one ' +
+      'translation per input id, keeping the same ids.\n' +
+      '- The source text comes from OCR and may contain recognition errors; ' +
+      'infer the intended wording from the surrounding blocks.\n' +
+      '- Use the other blocks as context so pronouns, honorifics and register ' +
+      'stay consistent across the page.\n' +
+      '- Keep it as short as the original: it has to fit back inside the same ' +
+      'speech bubble.\n' +
+      '- Keep sound effects as sound effects.\n' +
+      '- Never merge or split blocks, never add commentary, never leave a ' +
+      'block empty. If a block is unreadable, repeat it unchanged.',
+    messages: [
+      {
+        role: 'user',
+        content: `Source language: ${sourceLabel}. Target language: ${targetName}.\n\n${numbered}`,
+      },
+    ],
+  });
+
+  const parsed = response.parsed_output;
+  if (!parsed) return null;
+
+  const out = [...texts];
+  let filled = 0;
+  for (const item of parsed.translations) {
+    if (!Number.isInteger(item.id) || item.id < 0 || item.id >= texts.length) continue;
+    const text = item.text.trim();
+    if (!text) continue;
+    out[item.id] = text;
+    filled++;
+  }
+  // A reply that covered almost nothing is more likely broken than correct.
+  if (filled < Math.ceil(texts.length / 2)) return null;
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// DeepL
+// ---------------------------------------------------------------------------
+
+async function deeplTranslate(
+  texts: string[],
+  targetLang: string,
+  sourceCode: string | null,
+): Promise<string[]> {
   const key = config.translate.deeplApiKey;
   const url = `${deeplBaseUrl()}/v2/translate`;
   const out: string[] = [];
 
-  for (let i = 0; i < lines.length; i += 25) {
-    const body = lines.slice(i, i + 25);
+  for (let i = 0; i < texts.length; i += 25) {
+    const body = texts.slice(i, i + 25);
     const payload: Record<string, unknown> = { text: body, target_lang: targetLang };
-    if (sourceLang) payload.source_lang = sourceLang;
+    if (sourceCode) payload.source_lang = sourceCode;
 
     const res = await fetch(url, {
       method: 'POST',
@@ -43,21 +146,51 @@ async function deeplTranslate(lines: string[], targetLang: string, sourceLang: s
   return out;
 }
 
-async function googleTranslate(lines: string[], targetLang: string): Promise<string[]> {
+// ---------------------------------------------------------------------------
+// Google (free endpoint) — last resort
+// ---------------------------------------------------------------------------
+
+/** Pulls plain strings out of the endpoint's two response shapes. */
+function parseGoogleBody(json: unknown, expected: number): string[] | null {
+  if (!Array.isArray(json)) return null;
+  const out = json.map((entry) => {
+    if (typeof entry === 'string') return entry;
+    if (Array.isArray(entry) && typeof entry[0] === 'string') return entry[0];
+    return '';
+  });
+  return out.length === expected ? out : null;
+}
+
+async function googleTranslate(
+  texts: string[],
+  targetLang: string,
+  sourceCode: string | null,
+): Promise<string[]> {
   const tl = deeplToGoogleLang(targetLang);
-  const separator = '\n';
-  // Batch all lines into a single request (joined by newlines) to avoid
-  // hammering the free endpoint; split the result back on the separator.
-  const joined = lines.join(separator);
-  // client=gtx is blocked for non-browser clients (TLS fingerprinting);
-  // dict-chrome-ex returns the same data and is not fingerprint-gated.
-  const url = `https://translate.googleapis.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=${tl}&dt=t&q=${encodeURIComponent(joined)}`;
-  const res = await fetchWithRetryGoogle(url);
-  const json = (await res.json()) as unknown;
-  const pairs = json as [string, string][];
-  const translated = (pairs[0]?.[0] ?? '').trim();
-  const parts = translated.split(separator);
-  return lines.map((line, i) => (parts[i]?.trim() ? parts[i]!.trim() : line));
+  const sl = sourceCode ?? 'auto';
+  const out: string[] = [];
+
+  // One `q` parameter per block: the old newline-joining scheme silently
+  // mis-aligned results whenever the engine merged or split a line.
+  for (let i = 0; i < texts.length; ) {
+    const chunk: string[] = [];
+    let length = 0;
+    while (i < texts.length && chunk.length < 20) {
+      const encoded = encodeURIComponent(texts[i]).length + 3;
+      if (chunk.length > 0 && length + encoded > 1500) break;
+      chunk.push(texts[i]);
+      length += encoded;
+      i++;
+    }
+    const params = chunk.map((t) => `q=${encodeURIComponent(t)}`).join('&');
+    // client=gtx is blocked for non-browser clients (TLS fingerprinting);
+    // dict-chrome-ex returns the same data and is not fingerprint-gated.
+    const url = `https://translate.googleapis.com/translate_a/t?client=dict-chrome-ex&sl=${sl}&tl=${tl}&dt=t&${params}`;
+    const res = await fetchWithRetryGoogle(url);
+    const parsed = parseGoogleBody(await res.json(), chunk.length);
+    out.push(...(parsed ?? chunk));
+  }
+  return out;
 }
 
 // Retry on transient 429/5xx from the free endpoint with small backoff.
@@ -93,114 +226,80 @@ function deeplToGoogleLang(target: string): string {
   }
 }
 
-/** Translates lines while preserving position/emptiness (1:1 mapping). */
-export async function translateLines(
-  lines: string[],
+// ---------------------------------------------------------------------------
+
+/**
+ * Translates whole text blocks (one speech bubble each), preserving order and
+ * arity. Providers are tried best-first: Claude when a key is configured, then
+ * DeepL, then the free Google endpoint.
+ */
+export async function translateBlocks(
+  texts: string[],
   targetLang: string,
-  sourceLang?: string,
+  sourceLang: string,
 ): Promise<TranslationResult> {
-  // Remember where the non-empty lines sit so we can reassemble exactly.
-  const positions: number[] = [];
-  const need: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    positions.push(i);
-    need.push(line);
-  }
+  if (texts.length === 0) return { provider: 'none', texts: [] };
+  if (isSameLanguage(sourceLang, targetLang)) return { provider: 'none', texts: [...texts] };
 
-  const translated = new Array<string>(need.length).fill('');
-  const toFetch: string[] = [];
-  const fetchIdx: number[] = [];
-  need.forEach((line, i) => {
-    const hit = lineCache.get(`${targetLang}:${line}`);
-    if (hit !== undefined) translated[i] = hit;
+  const output = [...texts];
+  const pending: string[] = [];
+  const pendingIdx: number[] = [];
+  texts.forEach((text, i) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const hit = memo.get(memoKey(targetLang, trimmed));
+    if (hit !== undefined) output[i] = hit;
     else {
-      toFetch.push(line);
-      fetchIdx.push(i);
+      pending.push(trimmed);
+      pendingIdx.push(i);
     }
   });
+  if (pending.length === 0) return { provider: 'none', texts: output };
 
-  if (toFetch.length > 0) {
-    const src = sourceLang ? deeplSourceCode(sourceLang) : '';
-    let provider: 'deepl' | 'google' = 'google';
-    let results: string[] | null = null;
+  const spec = langSpec(sourceLang);
+  let provider: Provider = 'google';
+  let results: string[] | null = null;
 
-    if (config.translate.deeplApiKey) {
-      try {
-        results = await deeplTranslate(toFetch, targetLang, src);
+  if (isLlmConfigured()) {
+    try {
+      results = await claudeTranslate(pending, targetLang, spec.label);
+      if (results) provider = 'claude';
+      else console.warn('[translate] Claude returned an unusable reply; falling back');
+    } catch (err) {
+      console.error(
+        `[translate] Claude failed: ${err instanceof Error ? err.message : err}; falling back`,
+      );
+    }
+  }
+
+  if (!results && config.translate.deeplApiKey) {
+    try {
+      results = await deeplTranslate(pending, targetLang, spec.deepl);
+      if (results.length !== pending.length) {
+        console.warn('[translate] DeepL returned a mismatched count; falling back to Google');
+        results = null;
+      } else {
         provider = 'deepl';
-      } catch (err) {
-        console.error(`[translate] DeepL failed: ${err instanceof Error ? err.message : err}; using Google fallback`);
       }
+    } catch (err) {
+      console.error(
+        `[translate] DeepL failed: ${err instanceof Error ? err.message : err}; using Google fallback`,
+      );
     }
-    if (!results) results = await googleTranslate(toFetch, targetLang);
-
-    results.forEach((text, i) => {
-      translated[fetchIdx[i]] = text;
-      if (text) lineCache.set(`${targetLang}:${toFetch[i]}`, text);
-    });
   }
 
-  const output = new Array<string>(lines.length).fill('');
-  positions.forEach((pos, i) => {
-    output[pos] = translated[i] || lines[pos];
+  if (!results) {
+    // DeepL source codes are the ISO-639-1 base, which Google accepts too.
+    results = await googleTranslate(pending, targetLang, spec.deepl ? spec.deepl.toLowerCase() : null);
+    provider = 'google';
+  }
+
+  results.forEach((text, i) => {
+    const clean = (text ?? '').trim();
+    if (!clean) return;
+    output[pendingIdx[i]] = clean;
+    memo.set(memoKey(targetLang, pending[i]), clean);
   });
-  // Keep original empties empty.
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].trim()) output[i] = '';
-  }
 
-  return { provider: config.translate.deeplApiKey ? 'deepl' : 'google', lines: output };
-}
-
-function deeplSourceCode(ocrLang: string): string {
-  switch (ocrLang) {
-    case 'jpn':
-      return 'JA';
-    case 'kor':
-      return 'KO';
-    case 'chi_sim':
-    case 'chi_tra':
-      return 'ZH';
-    case 'fra':
-      return 'FR';
-    case 'deu':
-      return 'DE';
-    case 'spa':
-      return 'ES';
-    case 'rus':
-      return 'RU';
-    default:
-      return '';
-  }
-}
-
-/** Maps a MangaDex-style language code to a source language for OCR. */
-export function normalizeOcrSource(lang: string | null | undefined): { ocr: string; label: string } {
-  switch ((lang ?? '').toLowerCase()) {
-    case 'ja':
-      return { ocr: 'jpn', label: 'Japanese' };
-    case 'ko':
-      return { ocr: 'kor', label: 'Korean' };
-    case 'zh':
-    case 'zh-hk':
-    case 'zh-hans':
-      return { ocr: 'chi_sim', label: 'Chinese Simplified' };
-    case 'zh-hant':
-      return { ocr: 'chi_tra', label: 'Chinese Traditional' };
-    case 'fr':
-      return { ocr: 'fra', label: 'French' };
-    case 'de':
-      return { ocr: 'deu', label: 'German' };
-    case 'es':
-      return { ocr: 'spa', label: 'Spanish' };
-    case 'ru':
-      return { ocr: 'rus', label: 'Russian' };
-    case 'pt':
-    case 'pt-br':
-      return { ocr: 'por', label: 'Portuguese' };
-    default:
-      return { ocr: 'eng', label: 'English' };
-  }
+  return { provider, texts: output };
 }

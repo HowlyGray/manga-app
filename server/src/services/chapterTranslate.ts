@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config';
 import { chapterDir } from '../db';
-import { listPages } from './library';
+import { getChapter, listPages } from './library';
 import { translatePage } from './imgtranslate';
 
 export interface ChapterTranslateJob {
@@ -36,6 +36,9 @@ export function startChapterTranslate(titleId: string, chapterId: string, target
   if (existing && existing.running) return existing;
 
   const pages = listPages(chapterId).filter((p) => p.downloaded === 1 && p.local_path);
+  // OCR must follow the language actually printed on the page: that is the
+  // chapter's language, not the title's original language.
+  const sourceLang = getChapter(titleId, chapterId)?.language ?? config.translate.defaultSource;
   const job: ChapterTranslateJob = {
     key,
     titleId,
@@ -49,7 +52,7 @@ export function startChapterTranslate(titleId: string, chapterId: string, target
   };
   jobs.set(key, job);
 
-  runJob(job, pages.map((p) => ({ pageNumber: p.page_number, localPath: p.local_path! })))
+  runJob(job, sourceLang, pages.map((p) => ({ pageNumber: p.page_number, localPath: p.local_path! })))
     .catch((err: unknown) => {
       job.error = err instanceof Error ? err.message : String(err);
       job.running = false;
@@ -64,6 +67,7 @@ export function startChapterTranslate(titleId: string, chapterId: string, target
 
 async function runJob(
   job: ChapterTranslateJob,
+  sourceLang: string,
   pages: { pageNumber: number; localPath: string }[],
 ): Promise<void> {
   for (const page of pages) {
@@ -81,7 +85,7 @@ async function runJob(
         titleId: job.titleId,
         chapterId: job.chapterId,
         pageNumber: page.pageNumber,
-        sourceLang: '',
+        sourceLang,
         targetLang: job.target,
         localPath: page.localPath,
       });

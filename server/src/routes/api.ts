@@ -5,7 +5,8 @@ import { coverDir, config } from '../config';
 import * as ingest from '../services/ingest';
 import * as lib from '../services/library';
 import * as imgtranslator from '../services/imgtranslate';
-import { normalizeOcrSource } from '../services/translator';
+import { isLlmConfigured } from '../services/translator';
+import { langSpec } from '../services/lang';
 import { downloadChapter } from '../downloader';
 import { getChapterTranslateStatus, startChapterTranslate } from '../services/chapterTranslate';
 
@@ -222,6 +223,9 @@ apiRouter.get('/library/:id/chapters/:chapterId', (req, res) => {
       title: ch.chapter_title,
       volume: ch.volume,
       language: ch.language,
+      // Human-readable name of the language actually printed on these pages;
+      // the reader uses it to label the translation controls.
+      languageLabel: langSpec(ch.language).label,
       pages: ch.pages,
       scanlator: ch.scanlator,
       publishedAt: ch.published_at,
@@ -280,8 +284,21 @@ apiRouter.get('/library/data/:titleId/:chapterId/:pageNumber', (req, res) => {
   res.sendFile(filePath);
 });
 
+/**
+ * The language to OCR a page as is the chapter's own language. Using the
+ * title's `original_lang` meant Japanese OCR ran on Georgian and English scans.
+ */
+function chapterSourceLang(titleId: string, chapterId: string): string {
+  const chapter = lib.getChapter(titleId, chapterId);
+  return chapter?.language || config.translate.defaultSource;
+}
+
 apiRouter.get('/translate/languages', (_req, res) => {
-  res.json({ targets: config.translate.targets, source: config.translate.ocrSource });
+  res.json({
+    targets: config.translate.targets,
+    defaultSource: config.translate.defaultSource,
+    llm: isLlmConfigured(),
+  });
 });
 
 // Poll a chapter-translation job. Register before the :pageNumber route so
@@ -307,6 +324,82 @@ apiRouter.post('/translate/:titleId/:chapterId', (req, res) => {
   res.json({ started: job.running, ...job });
 });
 
+/** Shared guard for the per-page translation routes. */
+function resolvePage(
+  req: { params: Record<string, string>; query: Record<string, unknown> },
+): { titleId: string; chapterId: string; pageNumber: number; target: string; localPath: string } | { error: string; status: number } {
+  const { titleId, chapterId } = req.params;
+  const pageNumber = Number(req.params.pageNumber);
+  const target = typeof req.query.target === 'string' ? req.query.target.toUpperCase() : 'EN';
+  if (!config.translate.targets.includes(target)) {
+    return { error: `unsupported target: ${target}`, status: 400 };
+  }
+  const localPath = imgtranslator.pageLocalPath(titleId, chapterId, pageNumber);
+  if (!localPath || !fs.existsSync(localPath)) {
+    return { error: 'page not downloaded', status: 404 };
+  }
+  return { titleId, chapterId, pageNumber, target, localPath };
+}
+
+// The page with the original lettering erased but nothing drawn on top. The
+// reader pairs it with the HTML text layer: an HTML box cannot follow the curve
+// of a speech balloon, but an already-erased balloon does not need one.
+apiRouter.get('/translate/:titleId/:chapterId/:pageNumber/clean', async (req, res) => {
+  const resolved = resolvePage(req as never);
+  if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+  try {
+    const result = await imgtranslator.renderPage(
+      {
+        titleId: resolved.titleId,
+        chapterId: resolved.chapterId,
+        pageNumber: resolved.pageNumber,
+        sourceLang: chapterSourceLang(resolved.titleId, resolved.chapterId),
+        targetLang: resolved.target,
+        localPath: resolved.localPath,
+      },
+      'clean',
+    );
+    res.setHeader('Content-Type', result.mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(result.buffer);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[clean p${resolved.pageNumber}] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
+// Text-layer description for a page: the reader draws it over the original
+// scan, which keeps the artwork pristine and the text selectable.
+apiRouter.get('/translate/:titleId/:chapterId/:pageNumber/overlay', async (req, res) => {
+  const { titleId, chapterId } = req.params;
+  const pageNumber = Number(req.params.pageNumber);
+  const target = typeof req.query.target === 'string' ? req.query.target.toUpperCase() : 'EN';
+  if (!config.translate.targets.includes(target)) {
+    return res.status(400).json({ error: `unsupported target: ${target}` });
+  }
+  const localPath = imgtranslator.pageLocalPath(titleId, chapterId, pageNumber);
+  if (!localPath || !fs.existsSync(localPath)) {
+    return res.status(404).json({ error: 'page not downloaded' });
+  }
+  try {
+    const overlay = await imgtranslator.pageOverlay({
+      titleId,
+      chapterId,
+      pageNumber,
+      sourceLang: chapterSourceLang(titleId, chapterId),
+      targetLang: target,
+      localPath,
+    });
+    res.setHeader('Cache-Control', 'no-cache');
+    res.json(overlay);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[overlay p${pageNumber}] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
 apiRouter.get('/translate/:titleId/:chapterId/:pageNumber', async (req, res) => {
   const { titleId, chapterId } = req.params;
   const pageNumber = Number(req.params.pageNumber);
@@ -318,8 +411,7 @@ apiRouter.get('/translate/:titleId/:chapterId/:pageNumber', async (req, res) => 
   if (!localPath || !fs.existsSync(localPath)) {
     return res.status(404).json({ error: 'page not downloaded' });
   }
-  const title = lib.getTitle(titleId);
-  const sourceLang = normalizeOcrSource(title?.original_lang).ocr;
+  const sourceLang = chapterSourceLang(titleId, chapterId);
   try {
     const result = await imgtranslator.translatePage({
       titleId,

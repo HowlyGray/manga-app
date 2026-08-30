@@ -6,7 +6,7 @@ import type {
   Progress,
   TitleDetailResponse,
 } from './types';
-import type { ChapterTranslateState } from './types';
+import type { ChapterTranslateState, PageOverlay, TranslateLanguages } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -88,6 +88,15 @@ export const api = {
     return request<ChapterTranslateState>(`/api/translate/${titleId}/${chapterId}?target=${t}`, {
       method: 'POST',
     });
+  },
+
+  translateLanguages() {
+    return request<TranslateLanguages>('/api/translate/languages');
+  },
+
+  pageOverlay(titleId: string, chapterId: string, page: number, target: string) {
+    const t = target.toUpperCase();
+    return request<PageOverlay>(`/api/translate/${titleId}/${chapterId}/${page}/overlay?target=${t}`);
   },
 
   chapterTranslateStatus(titleId: string, chapterId: string, target: string) {

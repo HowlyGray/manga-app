@@ -448,7 +448,11 @@ a {
   gap: 4px;
 }
 
-.reader-pages.scroll img {
+.reader-pages.scroll .page-frame {
+  width: 100%;
+}
+
+.reader-pages.scroll .page-frame img {
   width: 100%;
   height: auto;
   display: block;
@@ -465,9 +469,16 @@ a {
   overflow: hidden;
 }
 
-.reader-pages.page img {
+.reader-pages.page .page-frame {
+  max-width: 100%;
+}
+
+.reader-pages.page .page-frame img {
+  display: block;
   max-width: 100%;
   max-height: 85vh;
+  width: auto;
+  height: auto;
   margin: 0 auto;
 }
 
@@ -560,4 +571,102 @@ a {
   padding: 60px 20px;
   text-align: center;
   color: var(--muted);
+}
+/* ---- utilities ---- */
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.78rem;
+}
+
+/* ---- translation controls ---- */
+
+.reader-translate {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.reader-translate label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.reader-translate .chip {
+  padding: 6px 12px;
+  font-size: 0.82rem;
+}
+
+/* ---- page + translated text layer ---- */
+
+/*
+ * `container-type: inline-size` makes 1cqw equal 1% of the displayed page
+ * width, so the overlay's font sizes — which the server computes in original
+ * page pixels — track the image at any zoom level.
+ */
+.page-frame {
+  position: relative;
+  container-type: inline-size;
+  line-height: 0;
+}
+
+.page-text-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.page-text {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.15em;
+  overflow: hidden;
+  text-align: center;
+  font-family: 'Comic Sans MS', 'Comic Neue', 'Segoe UI', system-ui, sans-serif;
+  font-weight: 700;
+  overflow-wrap: break-word;
+  pointer-events: auto;
+  user-select: text;
+}
+
+.page-text > span {
+  display: block;
+  width: 100%;
+}
+
+/* Text that sits over artwork rides on a translucent plate instead of erasing. */
+.page-text.on-art {
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.14);
+}
+
+.page-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.page-badge.error {
+  background: rgba(220, 38, 38, 0.88);
 }

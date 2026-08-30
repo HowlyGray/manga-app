@@ -1,16 +1,33 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
-import type { ChapterDetailResponse, ChapterView, PageView, TitleDetailResponse } from '../types';
+import PageFrame from '../components/PageFrame';
+import { usePageOverlays } from '../hooks';
+import type {
+  ChapterDetailResponse,
+  ChapterView,
+  PageView,
+  TitleDetailResponse,
+  TranslateLanguages,
+} from '../types';
 
 type Mode = 'page' | 'scroll';
+/** How translated text is presented: live HTML, or the flattened PNG. */
+type TextMode = 'overlay' | 'baked';
 
 function labelOf(c: ChapterView | null | undefined): string {
   if (!c) return '—';
   return c.chapter ? `Ch. ${c.chapter}${c.title ? ` · ${c.title}` : ''}` : 'One-shot';
 }
 
-const TARGET_LANGS = ['EN', 'FR', 'DE', 'ES', 'PT-BR', 'IT', 'NL', 'PL', 'RU', 'KO', 'JA', 'ZH-HANS', 'ZH-HANT', 'TR', 'ID'];
+const FALLBACK_TARGETS = ['EN', 'FR', 'DE', 'ES', 'PT-BR', 'IT', 'NL', 'PL', 'RU', 'KO', 'JA', 'ZH-HANS', 'ZH-HANT', 'TR', 'ID'];
+
+const PROVIDER_LABEL: Record<string, string> = {
+  claude: 'Claude',
+  deepl: 'DeepL',
+  google: 'Google',
+  none: '—',
+};
 
 export default function Reader() {
   const { id, chapterId } = useParams();
@@ -23,13 +40,27 @@ export default function Reader() {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
+
+  const [languages, setLanguages] = useState<TranslateLanguages | null>(null);
   const [translateLang, setTranslateLang] = useState('');
-  const [translateHint, setTranslateHint] = useState('');
+  const [textMode, setTextMode] = useState<TextMode>('overlay');
+  const [showOriginal, setShowOriginal] = useState(false);
 
   const imgRefs = useRef<(HTMLImageElement | null)[]>([]);
   const saveTimer = useRef<number | undefined>(undefined);
   const downloadStarted = useRef(false);
   const restored = useRef(false);
+
+  const overlayActive = Boolean(translateLang) && textMode === 'overlay';
+  const { states: overlays, request: requestOverlay } = usePageOverlays(
+    id,
+    chapterId,
+    overlayActive ? translateLang : '',
+  );
+
+  useEffect(() => {
+    api.translateLanguages().then(setLanguages, () => setLanguages(null));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -98,16 +129,30 @@ export default function Reader() {
   const pages = detail?.pages ?? [];
   const downloaded = detail?.chapter.downloaded === 1;
   const ready = downloaded && pages.length > 0;
+  const targets = languages?.targets ?? FALLBACK_TARGETS;
 
   function pageUrl(p: PageView): string {
-    return translateLang ? `/api/translate/${id}/${chapterId}/${p.pageNumber}?target=${translateLang}` : p.url;
+    // Overlay mode starts from the untouched scan; only the baked view asks the
+    // server to flatten the translation into the image.
+    if (translateLang && textMode === 'baked') {
+      return `/api/translate/${id}/${chapterId}/${p.pageNumber}?target=${translateLang}`;
+    }
+    return p.url;
   }
 
-  function onTranslate(lang: string) {
-    setTranslateLang(lang);
-    setTranslateHint(lang ? 'Translating pages…' : '');
-    window.setTimeout(() => setTranslateHint(''), 5000);
+  /** Erased page that sits under the HTML text layer. */
+  function cleanUrl(p: PageView): string | undefined {
+    if (!overlayActive) return undefined;
+    return `/api/translate/${id}/${chapterId}/${p.pageNumber}/clean?target=${translateLang}`;
   }
+
+  /** First loaded overlay, used to report what the pipeline actually did. */
+  const overlayInfo = useMemo(() => {
+    for (const state of overlays.values()) {
+      if (state.status === 'ready') return state.overlay;
+    }
+    return null;
+  }, [overlays]);
 
   // Restore scroll position for the same chapter (best effort while images load).
   useEffect(() => {
@@ -188,6 +233,8 @@ export default function Reader() {
     );
   }
 
+  const sourceLabel = detail.chapter.languageLabel ?? detail.chapter.language;
+
   return (
     <div className="reader">
       <div className="reader-top">
@@ -203,23 +250,73 @@ export default function Reader() {
           <button className={mode === 'scroll' ? 'active' : ''} onClick={() => setMode('scroll')}>
             Scroll
           </button>
-          <select
-            className="chip"
-            value={translateLang}
-            onChange={(e) => onTranslate(e.target.value)}
-            title="Translate page text"
-          >
-            <option value="">Translate: Off</option>
-            {TARGET_LANGS.map((l) => (
-              <option key={l} value={l}>
-                Translate → {l}
-              </option>
-            ))}
-          </select>
         </div>
       </div>
 
-      {translateHint && <div className="notice">{translateHint}</div>}
+      <div className="reader-translate">
+        <label>
+          <span className="muted">Translate</span>
+          <select
+            className="chip"
+            value={translateLang}
+            onChange={(e) => setTranslateLang(e.target.value)}
+            title={`Text on these pages: ${sourceLabel}`}
+          >
+            <option value="">Off</option>
+            {targets.map((l) => (
+              <option key={l} value={l}>
+                {sourceLabel} → {l}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {translateLang && (
+          <>
+            <div className="reader-mode">
+              <button
+                className={textMode === 'overlay' ? 'active' : ''}
+                onClick={() => setTextMode('overlay')}
+                title="Live text over the cleaned scan: selectable and sharp at any zoom"
+              >
+                Overlay
+              </button>
+              <button
+                className={textMode === 'baked' ? 'active' : ''}
+                onClick={() => setTextMode('baked')}
+                title="Flattened page rendered server-side, ready to export"
+              >
+                Image
+              </button>
+            </div>
+
+            {textMode === 'overlay' && (
+              <button
+                className={`btn small${showOriginal ? ' primary' : ''}`}
+                onMouseDown={() => setShowOriginal(true)}
+                onMouseUp={() => setShowOriginal(false)}
+                onMouseLeave={() => setShowOriginal(false)}
+                onClick={() => setShowOriginal((v) => !v)}
+                title="Hide the translation and show the original lettering"
+              >
+                {showOriginal ? 'Showing original' : 'Show original'}
+              </button>
+            )}
+          </>
+        )}
+
+        {translateLang && overlayInfo && (
+          <span className="muted small">
+            {sourceLabel} → {translateLang} · OCR {overlayInfo.engine} ·{' '}
+            {PROVIDER_LABEL[overlayInfo.provider] ?? overlayInfo.provider}
+          </span>
+        )}
+        {translateLang && languages && !languages.llm && (
+          <span className="muted small" title="Set ANTHROPIC_API_KEY to translate each page with its own context">
+            (no page context)
+          </span>
+        )}
+      </div>
 
       {downloading && (
         <div className="notice">
@@ -236,14 +333,19 @@ export default function Reader() {
       {mode === 'scroll' && ready && (
         <div className="reader-pages scroll">
           {pages.map((p) => (
-            <img
+            <PageFrame
               key={p.pageNumber}
-              ref={(el) => {
+              pageNumber={p.pageNumber}
+              src={pageUrl(p)}
+              cleanSrc={cleanUrl(p)}
+              alt={`page ${p.pageNumber}`}
+              lazy
+              overlay={overlayActive ? overlays.get(p.pageNumber) ?? null : null}
+              showOriginal={showOriginal}
+              onRequestOverlay={overlayActive ? requestOverlay : undefined}
+              imgRef={(el) => {
                 imgRefs.current[p.pageNumber - 1] = el;
               }}
-              src={pageUrl(p)}
-              alt={`page ${p.pageNumber}`}
-              loading="lazy"
             />
           ))}
         </div>
@@ -253,7 +355,16 @@ export default function Reader() {
         <>
           <div className="reader-pages page">
             <div className="click-left" onClick={() => setPageIndex((p) => Math.max(0, p - 1))} />
-            <img src={pageUrl(pages[pageIndex])} alt={`page ${pageIndex + 1}`} />
+            <PageFrame
+              key={pages[pageIndex].pageNumber}
+              pageNumber={pages[pageIndex].pageNumber}
+              src={pageUrl(pages[pageIndex])}
+              cleanSrc={cleanUrl(pages[pageIndex])}
+              alt={`page ${pageIndex + 1}`}
+              overlay={overlayActive ? overlays.get(pages[pageIndex].pageNumber) ?? null : null}
+              showOriginal={showOriginal}
+              onRequestOverlay={overlayActive ? requestOverlay : undefined}
+            />
             <div
               className="click-right"
               onClick={() => setPageIndex((p) => Math.min(pages.length - 1, p + 1))}
