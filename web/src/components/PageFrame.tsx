@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { api } from '../api';
 import type { OverlayState } from '../hooks';
 import type { OverlayBlock } from '../types';
 
@@ -50,6 +51,8 @@ interface Props {
   /** Temporarily hides the translation so the original lettering shows. */
   showOriginal: boolean;
   onRequestOverlay?: (pageNumber: number) => void;
+  /** Re-reads this page after a correction is saved. */
+  onCorrected?: (pageNumber: number) => void;
   imgRef?: (el: HTMLImageElement | null) => void;
 }
 
@@ -67,9 +70,13 @@ export default function PageFrame({
   overlay,
   showOriginal,
   onRequestOverlay,
+  onCorrected,
   imgRef,
 }: Props) {
   const [shownWidth, setShownWidth] = useState(0);
+  const [editing, setEditing] = useState<number | null>(null);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
   const img = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
@@ -132,11 +139,71 @@ export default function PageFrame({
           {ready.blocks.map((block) => (
             <div
               key={block.id}
-              className={`page-text${block.inBubble ? '' : ' on-art'}`}
+              className={[
+                'page-text',
+                block.inBubble ? '' : 'on-art',
+                block.uncertain ? 'uncertain' : '',
+                editing === block.id ? 'editing' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
               style={blockStyle(block, ready.width, ready.height, shownWidth)}
-              title={block.source}
+              title={
+                block.uncertain
+                  ? `Read with low confidence (${block.confidence}%): "${block.source}"`
+                  : block.source
+              }
             >
-              <span>{block.text}</span>
+              {editing === block.id ? (
+                <form
+                  className="page-fix"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    setSaving(true);
+                    try {
+                      await api.saveCorrection(ready.sourceLang, block.source, draft);
+                      setEditing(null);
+                      onCorrected?.(pageNumber);
+                    } finally {
+                      setSaving(false);
+                    }
+                  }}
+                >
+                  <textarea
+                    value={draft}
+                    autoFocus
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') setEditing(null);
+                    }}
+                  />
+                  <div className="page-fix-actions">
+                    <button type="submit" disabled={saving}>
+                      {saving ? '…' : 'Save'}
+                    </button>
+                    <button type="button" onClick={() => setEditing(null)}>
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <>
+                  <span>{block.text}</span>
+                  {onCorrected && (
+                    <button
+                      className="page-fix-open"
+                      title="Fix what was read here"
+                      aria-label="Fix what was read here"
+                      onClick={() => {
+                        setDraft(block.source);
+                        setEditing(block.id);
+                      }}
+                    >
+                      ✎
+                    </button>
+                  )}
+                </>
+              )}
             </div>
           ))}
         </div>

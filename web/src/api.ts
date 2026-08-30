@@ -140,9 +140,20 @@ export const api = {
     return request<TranslateLanguages>('/api/translate/languages');
   },
 
-  pageOverlay(titleId: string, chapterId: string, page: number, target: string) {
+  pageOverlay(titleId: string, chapterId: string, page: number, target: string, refresh = false) {
     const t = target.toUpperCase();
-    return request<PageOverlay>(`/api/translate/${titleId}/${chapterId}/${page}/overlay?target=${t}`);
+    const bust = refresh ? '&refresh=1' : '';
+    return request<PageOverlay>(
+      `/api/translate/${titleId}/${chapterId}/${page}/overlay?target=${t}${bust}`,
+    );
+  },
+
+  /** Teaches the app a reading, reused on every later page in that language. */
+  saveCorrection(sourceLang: string, source: string, corrected: string) {
+    return request<{ ok: boolean; removed?: boolean }>('/api/corrections', {
+      method: 'POST',
+      body: JSON.stringify({ sourceLang, source, corrected }),
+    });
   },
 
   chapterTranslateStatus(titleId: string, chapterId: string, target: string) {

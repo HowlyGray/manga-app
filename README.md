@@ -124,6 +124,36 @@ Sources declare what they support: `GET /api/sources` reports `hasTags` and
 `hasShelves`, and the UI hides genre browsing for a source that has no tag
 vocabulary rather than showing an empty picker.
 
+## When a reading is not trustworthy
+
+OCR quality varies bubble to bubble, and a confident translation of something
+the engine could not read is worse than a visible doubt. Two things address it.
+
+A reading carrying a character that cannot belong to a word — `@`, `&`, `⁄`,
+`^` — is **marked in the reader** with a dashed outline; hovering shows the raw
+text and the confidence. This is a hard signal, unlike confidence itself:
+measured over a Vietnamese chapter, tesseract scored 36% of lines below 40 even
+where the reading was fine, so a confidence threshold alone would flag half the
+book. `@` appeared 21 times in that chapter and was a misread `G` every time
+("@IÚP" for "GIÚP").
+
+**Corrections are remembered.** Click the pencil on any bubble, fix what was
+read, and the correction is stored against that source language and applied to
+every later page — the same lettering misreads the same way throughout a
+series, so one fix keeps paying off. This is the only thing in the app that
+learns, and what it learns is your judgement, not a model's guess.
+
+Constraining tesseract to the language's alphabet was tried and rejected. It
+does remove the impossible characters, but by *deleting* them rather than
+correcting them: "@IÚP" became "IÚP" and mean confidence fell from 64 to 58.
+That trades text visibly broken — and therefore recoverable — for text that
+looks clean and has lost a letter.
+
+The largest remaining lever is the Claude provider, which is off unless
+`ANTHROPIC_API_KEY` is set. It reads the whole page at once and knows the
+language, so it repairs "LÄ @IÚP" to "LÀ GIÚP" on its own; DeepL and Google see
+one bubble at a time and translate the damage literally.
+
 ## Preview before downloading
 
 Opening a chapter no longer imports the title and downloads every page first.
@@ -322,6 +352,7 @@ npm run sync -w server -- <command> [options]
 | `CACHE_PAGES_MS`        | `600000`     | How long previewed page URLs stay usable (they expire upstream)|
 | `TRANSLATE_MIN_CONF`    | `55`         | Drop OCR lines below this confidence (0-100)                   |
 | `TRANSLATE_REFINE`      | `1`          | `0` disables the whole-balloon re-read pass                     |
+| `TRANSLATE_UNCERTAIN_CONF` | `35`      | Below this confidence a reading is marked unreliable            |
 | `TRANSLATE_FONT`        | –            | Path to the font used for baked pages (a bold comic face)      |
 | `TRANSLATE_FONT_CJK`    | –            | Path to the font used when the target language is CJK          |
 | `TRANSLATE_DET_THRESH`  | `0.15`       | Text-detection pixel threshold; lower finds fainter lettering  |

@@ -53,7 +53,7 @@ export default function Reader() {
   const restored = useRef(false);
 
   const overlayActive = Boolean(translateLang) && textMode === 'overlay';
-  const { states: overlays, request: requestOverlay } = usePageOverlays(
+  const { states: overlays, request: requestOverlay, refresh: refreshOverlay } = usePageOverlays(
     id,
     chapterId,
     overlayActive ? translateLang : '',
@@ -366,6 +366,7 @@ export default function Reader() {
               overlay={overlayActive ? overlays.get(p.pageNumber) ?? null : null}
               showOriginal={showOriginal}
               onRequestOverlay={overlayActive ? requestOverlay : undefined}
+              onCorrected={overlayActive ? refreshOverlay : undefined}
               imgRef={(el) => {
                 imgRefs.current[p.pageNumber - 1] = el;
               }}
@@ -387,6 +388,7 @@ export default function Reader() {
               overlay={overlayActive ? overlays.get(pages[pageIndex].pageNumber) ?? null : null}
               showOriginal={showOriginal}
               onRequestOverlay={overlayActive ? requestOverlay : undefined}
+              onCorrected={overlayActive ? refreshOverlay : undefined}
             />
             <div
               className="click-right"

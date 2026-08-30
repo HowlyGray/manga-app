@@ -29,13 +29,19 @@ export function usePageOverlays(
   chapterId: string | undefined,
   target: string,
   concurrency = 2,
-): { states: Map<number, OverlayState>; request: (pageNumber: number) => void } {
+): {
+  states: Map<number, OverlayState>;
+  request: (pageNumber: number) => void;
+  refresh: (pageNumber: number) => void;
+} {
   const key = `${titleId ?? ''}|${chapterId ?? ''}|${target}`;
   const [states, setStates] = useState<Map<number, OverlayState>>(new Map());
   const [activeKey, setActiveKey] = useState(key);
   const queue = useRef<number[]>([]);
   const active = useRef(0);
   const seen = useRef<Set<number>>(new Set());
+  /** Pages to re-read past the server cache, after a correction was saved. */
+  const forced = useRef<Set<number>>(new Set());
   const token = useRef(0);
 
   // Reset during render, not in an effect: React runs child effects before the
@@ -57,7 +63,7 @@ export function usePageOverlays(
       const pageNumber = queue.current.shift()!;
       active.current += 1;
       api
-        .pageOverlay(titleId, chapterId, pageNumber, target)
+        .pageOverlay(titleId, chapterId, pageNumber, target, forced.current.delete(pageNumber))
         .then(
           (overlay): OverlayState => ({ status: 'ready', overlay }),
           (err: Error): OverlayState => ({ status: 'error', message: err.message }),
@@ -86,5 +92,18 @@ export function usePageOverlays(
     [titleId, chapterId, target, pump],
   );
 
-  return { states, request };
+  /** Re-reads one page, bypassing the cached overlay. */
+  const refresh = useCallback(
+    (pageNumber: number) => {
+      if (!titleId || !chapterId || !target) return;
+      forced.current.add(pageNumber);
+      seen.current.add(pageNumber);
+      setStates((prev) => new Map(prev).set(pageNumber, { status: 'loading' }));
+      queue.current.push(pageNumber);
+      pump();
+    },
+    [titleId, chapterId, target, pump],
+  );
+
+  return { states, request, refresh };
 }

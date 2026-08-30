@@ -1112,3 +1112,94 @@ a.chip {
   justify-content: space-between;
   gap: 10px;
 }
+
+/* ---- unreliable readings and corrections ---- */
+
+/*
+ * A reading the OCR could not be trusted on is marked rather than presented as
+ * sound: a wrong translation shown confidently is worse than a visible doubt.
+ */
+.page-text.uncertain {
+  outline: 1px dashed rgba(245, 158, 11, 0.85);
+  outline-offset: 1px;
+}
+
+.page-text .page-fix-open {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.page-text:hover .page-fix-open,
+.page-fix-open:focus-visible {
+  opacity: 1;
+}
+
+.page-text.editing {
+  overflow: visible;
+  z-index: 5;
+}
+
+.page-fix {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow);
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.page-fix textarea {
+  min-height: 64px;
+  resize: vertical;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text);
+  font: inherit;
+  font-family: inherit;
+}
+
+.page-fix-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.page-fix-actions button {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.page-fix-actions button[type='submit'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}

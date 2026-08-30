@@ -185,3 +185,18 @@ export function languageRanker(preferred: string[]): (code: string | null | unde
     return hit !== undefined ? hit : preferred.length + pipelineRank(key);
   };
 }
+
+/**
+ * Symbols OCR emits that are never part of a word in any script we handle.
+ *
+ * Measured on a Vietnamese chapter: `@` alone appeared 21 times, every one of
+ * them a misread `G` ("@IÚP" for "GIÚP"). Letters that merely look foreign are
+ * deliberately not here — `Ä` and `Ï` are wrong in Vietnamese but perfectly
+ * ordinary in German or French, and a language-blind list would flag those.
+ */
+const NON_LETTERS = /[@&\|~^⁄¤©°§±¶µ]/;
+
+/** True when a reading contains a character that cannot belong to a word. */
+export function hasImpossibleCharacters(text: string): boolean {
+  return NON_LETTERS.test(text);
+}

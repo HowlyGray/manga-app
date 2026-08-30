@@ -184,6 +184,10 @@ export interface OverlayBlock {
   fontSize: number;
   lineHeight: number;
   lines: string[];
+  /** Mean OCR confidence over the block, 0-100. */
+  confidence: number;
+  /** The reading is not trustworthy and is marked as such in the reader. */
+  uncertain: boolean;
 }
 
 export interface PageOverlay {

@@ -105,6 +105,24 @@ CREATE TABLE IF NOT EXISTS source_cache (
 );
 `;
 
+/**
+ * Readings the user has fixed by hand, reused on every later page.
+ *
+ * OCR misreads the same lettering the same way throughout a series, so one
+ * correction pays off repeatedly — this is the only form of "training" the app
+ * does, and it is the user's own, not a model's.
+ */
+const CORRECTION_SCHEMA = `
+CREATE TABLE IF NOT EXISTS corrections (
+  source_lang TEXT NOT NULL,
+  source_text TEXT NOT NULL,
+  corrected_text TEXT NOT NULL,
+  hits INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (source_lang, source_text)
+);
+`;
+
 function migrate(db: Database.Database): void {
   const version = db.pragma('user_version', { simple: true }) as number;
   if (version < 1) {
@@ -116,6 +134,10 @@ function migrate(db: Database.Database): void {
   if (version < 2) {
     db.exec(CACHE_SCHEMA);
     db.pragma('user_version = 2');
+  }
+  if (version < 3) {
+    db.exec(CORRECTION_SCHEMA);
+    db.pragma('user_version = 3');
   }
 }
 

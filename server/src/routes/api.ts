@@ -10,6 +10,7 @@ import { langSpec } from '../services/lang';
 import { hasProvider, listProviders } from '../sources';
 import { coverFile } from '../services/sourceCache';
 import { previewChapterInfo, previewPages } from '../services/preview';
+import { deleteCorrection, listCorrections, saveCorrection } from '../services/corrections';
 import { decodeId, getProvider } from '../sources';
 import { downloadChapter } from '../downloader';
 import { getChapterTranslateStatus, startChapterTranslate } from '../services/chapterTranslate';
@@ -488,6 +489,25 @@ apiRouter.get('/preview/:titleId/:chapterId/:pageNumber', async (req, res) => {
   }
 });
 
+/** Readings the user has corrected, reused on every later page. */
+apiRouter.get('/corrections', (req, res) => {
+  const lang = typeof req.query.lang === 'string' ? req.query.lang : undefined;
+  res.json({ corrections: listCorrections(lang) });
+});
+
+apiRouter.post('/corrections', (req, res) => {
+  const { sourceLang, source, corrected } = req.body ?? {};
+  if (typeof sourceLang !== 'string' || typeof source !== 'string' || typeof corrected !== 'string') {
+    return res.status(400).json({ error: 'sourceLang, source and corrected are required' });
+  }
+  if (!corrected.trim()) {
+    deleteCorrection(sourceLang, source);
+    return res.json({ ok: true, removed: true });
+  }
+  saveCorrection(sourceLang, source, corrected);
+  res.json({ ok: true });
+});
+
 apiRouter.get('/translate/languages', (_req, res) => {
   res.json({
     targets: config.translate.targets,
@@ -579,14 +599,17 @@ apiRouter.get('/translate/:titleId/:chapterId/:pageNumber/overlay', async (req, 
     return res.status(404).json({ error: 'page not downloaded' });
   }
   try {
-    const overlay = await imgtranslator.pageOverlay({
-      titleId,
-      chapterId,
-      pageNumber,
-      sourceLang: chapterSourceLang(titleId, chapterId),
-      targetLang: target,
-      localPath,
-    });
+    const overlay = await imgtranslator.pageOverlay(
+      {
+        titleId,
+        chapterId,
+        pageNumber,
+        sourceLang: chapterSourceLang(titleId, chapterId),
+        targetLang: target,
+        localPath,
+      },
+      { refresh: req.query.refresh === '1' },
+    );
     res.setHeader('Cache-Control', 'no-cache');
     res.json(overlay);
   } catch (err) {

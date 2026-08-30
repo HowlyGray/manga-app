@@ -13,14 +13,22 @@ import { config } from '../config';
 import { chapterDir } from '../db';
 import { eraseInto, fitBubble, type Box, type BubbleFit, type PageRaster } from './bubble';
 import { fontStack } from './fonts';
-import { isSameLanguage, langSpec, targetScript, wrapsAnywhere, type Script } from './lang';
+import {
+  hasImpossibleCharacters,
+  isSameLanguage,
+  langSpec,
+  targetScript,
+  wrapsAnywhere,
+  type Script,
+} from './lang';
 import { ocrPage, refineRegions, type RefineRegion } from './pageOcr';
 import { listPages, pageFile } from './library';
 import { groupIntoBlocks, type TextBlock } from './textBlocks';
 import { translateBlocks, type Provider } from './translator';
+import { applyCorrections } from './corrections';
 
 /** Bump when the overlay shape changes so stale caches are regenerated. */
-const OVERLAY_VERSION = 11;
+const OVERLAY_VERSION = 12;
 
 export interface OverlayBlock {
   id: number;
@@ -51,6 +59,14 @@ export interface OverlayBlock {
   lineHeight: number;
   /** Server-side wrapping, used by the baked render. */
   lines: string[];
+  /** Mean OCR confidence over the block's lines, 0-100. */
+  confidence: number;
+  /**
+   * The reading is not trustworthy: it carries a character that cannot be part
+   * of a word, or scored very low. The reader marks these instead of showing a
+   * confident translation of something it could not read.
+   */
+  uncertain: boolean;
 }
 
 export interface PageOverlay {
@@ -409,6 +425,13 @@ async function analyze(
 
   if (config.translate.refine) await refineBlockText(opts, blocks, fits, spec.code);
 
+  // A reading the user has fixed by hand wins outright: it is the one piece of
+  // ground truth in the pipeline.
+  const corrected = applyCorrections(spec.code, blocks.map((b) => b.text));
+  corrected.forEach((text, i) => {
+    blocks[i].text = text;
+  });
+
   // Reuse translations we already paid for when only the geometry changed.
   const previous = new Map((cached?.blocks ?? []).map((b) => [b.source, b.text]));
   const sources = blocks.map((b) => b.text);
@@ -452,6 +475,9 @@ async function analyze(
       fontSize: layout.fontSize,
       lineHeight: layout.lineHeight,
       lines: layout.lines,
+      confidence: Math.round(block.conf),
+      uncertain:
+        hasImpossibleCharacters(block.text) || block.conf < config.translate.uncertainConfidence,
     });
   });
 
@@ -471,10 +497,14 @@ async function analyze(
  * Returns the overlay description for a page, running the pipeline on a miss.
  * This is what the reader draws as live HTML over the original scan.
  */
-export async function pageOverlay(opts: TranslateOptions): Promise<PageOverlay> {
+export async function pageOverlay(
+  opts: TranslateOptions,
+  { refresh = false }: { refresh?: boolean } = {},
+): Promise<PageOverlay> {
   const file = overlayPath(opts);
   const cached = readOverlay(file);
-  if (cached) return cached;
+  // A correction has to be able to take effect without clearing the cache.
+  if (cached && !refresh) return cached;
 
   const { overlay } = await analyze(opts, null);
   writeJson(file, overlay);

@@ -69,6 +69,10 @@ export const config = {
     minConfidence: Number(process.env.TRANSLATE_MIN_CONF ?? 55),
     // Re-read each detected balloon as one block to recover dropped lines.
     refine: (process.env.TRANSLATE_REFINE ?? '1') !== '0',
+    // Below this confidence a reading is marked unreliable in the reader rather
+    // than presented as if it were sound. Tesseract scores manga lettering low
+    // across the board, so this is a floor for the genuinely bad, not a median.
+    uncertainConfidence: Number(process.env.TRANSLATE_UNCERTAIN_CONF ?? 35),
     // Manga-OCR (Python sidecar) — set MANGA_OCR=0 to disable.
     mangaOcr: {
       enabled: (process.env.MANGA_OCR ?? '1') !== '0',
