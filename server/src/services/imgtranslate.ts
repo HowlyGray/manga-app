@@ -11,7 +11,7 @@ import path from 'node:path';
 import { createCanvas, loadImage, type SKRSContext2D } from '@napi-rs/canvas';
 import { config } from '../config';
 import { chapterDir } from '../db';
-import { eraseInto, fitBubble, type BubbleFit, type PageRaster } from './bubble';
+import { eraseInto, fitBubble, type Box, type BubbleFit, type PageRaster } from './bubble';
 import { fontStack } from './fonts';
 import { isSameLanguage, langSpec, targetScript, wrapsAnywhere, type Script } from './lang';
 import { ocrPage } from './pageOcr';
@@ -20,7 +20,7 @@ import { groupIntoBlocks, type TextBlock } from './textBlocks';
 import { translateBlocks, type Provider } from './translator';
 
 /** Bump when the overlay shape changes so stale caches are regenerated. */
-const OVERLAY_VERSION = 3;
+const OVERLAY_VERSION = 6;
 
 export interface OverlayBlock {
   id: number;
@@ -281,7 +281,24 @@ async function analyze(
     width: img.width,
     height: img.height,
   };
-  blocks.forEach((block, i) => fits.set(i, fitBubble(raster, block)));
+  // Blocks are fitted one at a time, biggest first, and each one is fitted
+  // against the other blocks' lettering *and* the areas already claimed. Doing
+  // them independently let two neighbours grow into the same empty gap and end
+  // up overlapping, which is what pushed text outside its balloon.
+  const claimed: Box[] = [];
+  const byArea = blocks
+    .map((block, i) => ({ block, i }))
+    .sort(
+      (a, b) =>
+        (b.block.x1 - b.block.x0) * (b.block.y1 - b.block.y0) -
+        (a.block.x1 - a.block.x0) * (a.block.y1 - a.block.y0),
+    );
+  for (const { block, i } of byArea) {
+    const obstacles: Box[] = [...blocks.filter((_, j) => j !== i), ...claimed];
+    const fit = fitBubble(raster, block, obstacles);
+    fits.set(i, fit);
+    claimed.push({ x0: fit.x0, y0: fit.y0, x1: fit.x1, y1: fit.y1 });
+  }
 
   // Reuse translations we already paid for when only the geometry changed.
   const previous = new Map((cached?.blocks ?? []).map((b) => [b.source, b.text]));

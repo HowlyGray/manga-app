@@ -41,7 +41,8 @@ export interface BubbleFit {
   mask?: Uint8Array;
 }
 
-interface Box {
+/** Axis-aligned box in page pixels. */
+export interface Box {
   x0: number;
   y0: number;
   x1: number;
@@ -266,7 +267,7 @@ function regionMask(
  * Works out whether a text block sits inside a bubble and, if so, which pixels
  * to repaint. Callers pass a raster grabbed once per page, not per block.
  */
-export function fitBubble(page: PageRaster, block: Box): BubbleFit {
+export function fitBubble(page: PageRaster, block: Box, others: Box[] = []): BubbleFit {
   const bw = block.x1 - block.x0;
   const bh = block.y1 - block.y0;
   const plainAt = (r: number, g: number, b: number): BubbleFit => ({
@@ -311,62 +312,38 @@ export function fitBubble(page: PageRaster, block: Box): BubbleFit {
   if ((overlapW * overlapH) / blockArea < 0.55) return plain;
 
   const fillLum = luminance(ring.r, ring.g, ring.b);
-  const inner = inscribedBox(region.mask, rect, region.bounds);
-  // Two bubbles that touch flood-fill into one region. Erasing both is right,
-  // but the text must stay near its own bubble, so the layout box may only
-  // grow so far past the lettering it replaces.
-  const growX = bw * 0.45;
-  const growY = bh * 0.45;
   return {
     inBubble: true,
     fill: `rgb(${Math.round(ring.r)},${Math.round(ring.g)},${Math.round(ring.b)})`,
     textColor: fillLum < 120 ? '#ffffff' : '#000000',
-    x0: clamp(inner.x0, block.x0 - growX, block.x0),
-    y0: clamp(inner.y0, block.y0 - growY, block.y0),
-    x1: clamp(inner.x1, block.x1, block.x1 + growX),
-    y1: clamp(inner.y1, block.y1, block.y1 + growY),
+    ...grownBox(region.mask, rect, block, others),
     rect,
     mask: region.mask,
   };
 }
 
 /**
- * Largest axis-aligned box that stays inside the filled region.
+ * Largest box around the text that stays inside the filled region.
  *
- * Bubbles are ellipses, so their bounding box pokes out at the corners; laying
- * text out to that box is what pushed lines past the bubble outline and into
- * the neighbouring panel. Growing a centred box until it starts leaving the
- * mask gives the area text can actually occupy.
+ * Grows outward from the lettering itself, one edge at a time, stopping when a
+ * strip would cross the balloon outline. Scaling the region's bounding box
+ * instead (the earlier approach) broke on two balloons that touch: they
+ * flood-fill into one region, so the box was centred between them and spilled
+ * over the neighbour.
  */
-function inscribedBox(mask: Uint8Array, rect: Rect, bounds: Box): Box {
+function grownBox(mask: Uint8Array, rect: Rect, block: Box, others: Box[]): Box {
   const { x, y, w, h } = rect;
-  let sumX = 0;
-  let sumY = 0;
-  let n = 0;
-  for (let py = 0; py < h; py++) {
-    for (let px = 0; px < w; px++) {
-      if (!mask[py * w + px]) continue;
-      sumX += px;
-      sumY += py;
-      n++;
-    }
-  }
-  if (n === 0) return { x0: bounds.x0, y0: bounds.y0, x1: bounds.x1, y1: bounds.y1 };
-  const cx = sumX / n;
-  const cy = sumY / n;
-  const halfW = (bounds.x1 - bounds.x0) / 2;
-  const halfH = (bounds.y1 - bounds.y0) / 2;
+  let x0 = Math.round(clamp(block.x0 - x, 0, w - 1));
+  let x1 = Math.round(clamp(block.x1 - x, 0, w - 1));
+  let y0 = Math.round(clamp(block.y0 - y, 0, h - 1));
+  let y1 = Math.round(clamp(block.y1 - y, 0, h - 1));
 
-  /** Share of the candidate box that is inside the region. */
-  const coverage = (sx: number, sy: number): number => {
-    const x0 = Math.max(0, Math.round(cx - halfW * sx));
-    const x1 = Math.min(w - 1, Math.round(cx + halfW * sx));
-    const y0 = Math.max(0, Math.round(cy - halfH * sy));
-    const y1 = Math.min(h - 1, Math.round(cy + halfH * sy));
+  /** Share of a candidate strip that lies inside the region. */
+  const strip = (sx0: number, sy0: number, sx1: number, sy1: number): number => {
     let inside = 0;
     let total = 0;
-    for (let py = y0; py <= y1; py++) {
-      for (let px = x0; px <= x1; px++) {
+    for (let py = sy0; py <= sy1; py++) {
+      for (let px = sx0; px <= sx1; px++) {
         total++;
         if (mask[py * w + px]) inside++;
       }
@@ -374,32 +351,65 @@ function inscribedBox(mask: Uint8Array, rect: Rect, bounds: Box): Box {
     return total === 0 ? 0 : inside / total;
   };
 
-  // Search the two axes independently: scaling both by one factor badly
-  // under-uses tall bubbles, whose bounding box is far wider than their waist.
-  let bestSx = 0.4;
-  let bestSy = 0.4;
-  let bestArea = 0;
-  for (const sx of [1, 0.92, 0.84, 0.76, 0.68, 0.6, 0.52]) {
-    let lo = 0.3;
-    let hi = 1;
-    for (let i = 0; i < 6; i++) {
-      const mid = (lo + hi) / 2;
-      if (coverage(sx, mid) >= 0.95) lo = mid;
-      else hi = mid;
+  /**
+   * Two balloons that touch flood-fill into one region, so the mask alone does
+   * not stop growth at the balloon they share. Another block's lettering does:
+   * a layout area must never swallow text that belongs to a different bubble.
+   */
+  const hitsNeighbour = (sx0: number, sy0: number, sx1: number, sy1: number): boolean =>
+    others.some(
+      (o) => x + sx1 >= o.x0 - 2 && x + sx0 <= o.x1 + 2 && y + sy1 >= o.y0 - 2 && y + sy0 <= o.y1 + 2,
+    );
+
+  // The text may not be worth much more room than it already had; a balloon is
+  // rarely more than a couple of times the size of its own lettering.
+  const maxW = Math.max(24, (block.x1 - block.x0) * 2.4);
+  const maxH = Math.max(24, (block.y1 - block.y0) * 2.4);
+  const step = Math.max(1, Math.round(Math.min(w, h) / 90));
+  const clear = 0.94;
+
+  for (let guard = 0; guard < 400; guard++) {
+    let grew = false;
+    if (
+      y0 - step >= 0 &&
+      y1 - y0 < maxH &&
+      strip(x0, y0 - step, x1, y0 - 1) >= clear &&
+      !hitsNeighbour(x0, y0 - step, x1, y0 - 1)
+    ) {
+      y0 -= step;
+      grew = true;
     }
-    const area = sx * lo;
-    if (coverage(sx, lo) >= 0.95 && area > bestArea) {
-      bestArea = area;
-      bestSx = sx;
-      bestSy = lo;
+    if (
+      y1 + step < h &&
+      y1 - y0 < maxH &&
+      strip(x0, y1 + 1, x1, y1 + step) >= clear &&
+      !hitsNeighbour(x0, y1 + 1, x1, y1 + step)
+    ) {
+      y1 += step;
+      grew = true;
     }
+    if (
+      x0 - step >= 0 &&
+      x1 - x0 < maxW &&
+      strip(x0 - step, y0, x0 - 1, y1) >= clear &&
+      !hitsNeighbour(x0 - step, y0, x0 - 1, y1)
+    ) {
+      x0 -= step;
+      grew = true;
+    }
+    if (
+      x1 + step < w &&
+      x1 - x0 < maxW &&
+      strip(x1 + 1, y0, x1 + step, y1) >= clear &&
+      !hitsNeighbour(x1 + 1, y0, x1 + step, y1)
+    ) {
+      x1 += step;
+      grew = true;
+    }
+    if (!grew) break;
   }
-  return {
-    x0: x + cx - halfW * bestSx,
-    y0: y + cy - halfH * bestSy,
-    x1: x + cx + halfW * bestSx,
-    y1: y + cy + halfH * bestSy,
-  };
+
+  return { x0: x + x0, y0: y + y0, x1: x + x1, y1: y + y1 };
 }
 
 /** Paints a fit's mask into the page raster, erasing the original lettering. */
