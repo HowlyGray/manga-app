@@ -52,6 +52,16 @@ export interface PageImage {
   headers?: Record<string, string>;
 }
 
+export interface SourceSearchResult {
+  titles: SourceTitle[];
+  /**
+   * Total matches, or null when the provider does not report one. A null total
+   * is not a failure: some sources simply paginate blind, and the UI then shows
+   * a next/previous pager instead of a numbered one.
+   */
+  total: number | null;
+}
+
 export interface SourceProvider {
   /** Stable key, also used to prefix library ids. */
   readonly id: string;
@@ -59,8 +69,14 @@ export interface SourceProvider {
   readonly label: string;
   /** True when the provider can list titles without a search term. */
   readonly browsable: boolean;
+  /**
+   * Largest offset the provider will accept, or null when unbounded. MangaDex
+   * rejects anything past 10000 with a 400, so a pager built from the raw total
+   * would offer thousands of pages that cannot be fetched.
+   */
+  readonly maxOffset: number | null;
 
-  search(params: SourceSearch): Promise<{ total: number; titles: SourceTitle[] }>;
+  search(params: SourceSearch): Promise<SourceSearchResult>;
   getTitle(id: string): Promise<SourceTitle | null>;
   /**
    * Chapters for a title, already reduced to one per chapter number in the

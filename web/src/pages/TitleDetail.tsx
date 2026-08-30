@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
-import type { DownloadStatus, TitleDetailResponse } from '../types';
+import type { ChapterView, DownloadStatus, TitleDetailResponse } from '../types';
+import Pagination from '../components/Pagination';
 
 const TARGET_LANGS = ['EN', 'FR', 'DE', 'ES', 'PT-BR', 'IT', 'NL', 'PL', 'RU', 'KO', 'JA', 'ZH-HANS', 'ZH-HANT', 'TR', 'ID'];
 type TState = { target: string; running: boolean; done: number; total: number; failed: number; error?: string };
+
+const CHAPTERS_PER_PAGE = 60;
 
 export default function TitleDetail() {
   const { id } = useParams();
@@ -15,6 +18,9 @@ export default function TitleDetail() {
   const [polling, setPolling] = useState(false);
   const [activeLang, setActiveLang] = useState('');
   const [trl, setTrl] = useState<Record<string, TState>>({});
+  const [chFilter, setChFilter] = useState('');
+  const [chDesc, setChDesc] = useState(false);
+  const [chPage, setChPage] = useState(1);
 
   const refresh = useCallback(async () => {
     if (!id) return;
@@ -113,9 +119,24 @@ export default function TitleDetail() {
 
   const { title, chapters, progress, languages } = data;
   const pct = dl && dl.total > 0 ? Math.round((dl.downloaded / dl.total) * 100) : 0;
-  const visible = activeLang
+  const byLang = activeLang
     ? chapters.items.filter((c) => c.language === activeLang)
     : chapters.items;
+  const needle = chFilter.trim().toLowerCase();
+  const matching = needle
+    ? byLang.filter((c) =>
+        `${c.chapter ?? ''} ${c.title ?? ''} ${c.scanlator ?? ''}`.toLowerCase().includes(needle),
+      )
+    : byLang;
+  const ordered: ChapterView[] = chDesc ? [...matching].reverse() : matching;
+  // Long-running series reach several hundred chapters; rendering them all at
+  // once makes the page crawl and buries the chapter you came for.
+  const chPages = Math.max(1, Math.ceil(ordered.length / CHAPTERS_PER_PAGE));
+  const chapterPage = Math.min(chPage, chPages);
+  const visible = ordered.slice(
+    (chapterPage - 1) * CHAPTERS_PER_PAGE,
+    chapterPage * CHAPTERS_PER_PAGE,
+  );
   const coverSrc = data.coverUrl ?? `/api/library/${title.id}/cover`;
 
   return (
@@ -218,8 +239,29 @@ export default function TitleDetail() {
         </div>
       )}
 
+      <div className="chapter-toolbar">
+        <input
+          className="search"
+          placeholder="Filter chapters…"
+          value={chFilter}
+          onChange={(e) => {
+            setChFilter(e.target.value);
+            setChPage(1);
+          }}
+        />
+        <button className="btn small" onClick={() => setChDesc((v) => !v)}>
+          {chDesc ? '↓ Newest first' : '↑ Oldest first'}
+        </button>
+        <span className="muted small">
+          {ordered.length} chapter{ordered.length === 1 ? '' : 's'}
+          {chPages > 1 ? ` · page ${chapterPage} of ${chPages}` : ''}
+        </span>
+      </div>
+
       {visible.length === 0 && (
-        <div className="empty">No chapters in this language.</div>
+        <div className="empty">
+          {needle ? 'No chapter matches that filter.' : 'No chapters in this language.'}
+        </div>
       )}
 
       <div className="chapter-list">
@@ -284,6 +326,8 @@ export default function TitleDetail() {
         );
         })}
       </div>
+
+      <Pagination page={chapterPage} pages={chPages} hasMore={false} onChange={setChPage} />
     </div>
   );
 }

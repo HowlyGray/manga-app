@@ -13,9 +13,13 @@ export interface DiscoverItem {
 }
 
 export interface DiscoverResponse {
-  total: number;
+  /** Matching titles, or null when the source reports no count. */
+  total: number | null;
   page: number;
   limit: number;
+  /** Addressable pages; 0 when unknown. */
+  pages: number;
+  hasMore: boolean;
   source: string;
   titles: DiscoverItem[];
 }

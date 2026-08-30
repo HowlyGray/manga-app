@@ -67,10 +67,23 @@ apiRouter.get('/discover', async (req, res) => {
     console.error(`[discover] FAILED: ${message}`);
     return res.status(502).json({ error: message });
   }
+  // Pages the client may actually ask for: bounded by the match count when the
+  // source reports one, and by the offset the source will accept. A pager built
+  // from MangaDex's raw total would offer 2400 pages, of which 334 work.
+  // The last usable page is the one whose offset still lands within the source's
+  // limit, so it is floor(maxOffset / limit) + 1 -- not ceil over the item count.
+  const byOffset = result.maxOffset == null ? Infinity : Math.floor(result.maxOffset / limit) + 1;
+  const byTotal = result.total == null ? Infinity : Math.ceil(result.total / limit);
+  const bound = Math.min(byOffset, byTotal);
+  const pages = Number.isFinite(bound) ? Math.max(1, bound) : 0;
+
   res.json({
     total: result.total,
     page,
     limit,
+    // 0 means "unknown": the client falls back to a next/previous pager.
+    pages,
+    hasMore: pages > 0 ? page < pages : result.titles.length >= limit,
     source: result.source,
     titles: result.titles.map((t) => ({
       id: t.libraryId,

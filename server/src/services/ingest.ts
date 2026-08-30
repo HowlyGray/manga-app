@@ -23,14 +23,22 @@ export interface DiscoverParams extends SourceSearch {
   source?: string;
 }
 
-export async function discover(
-  params: DiscoverParams,
-): Promise<{ total: number; source: string; titles: (SourceTitle & { libraryId: string })[] }> {
+export interface DiscoverResult {
+  /** Matching titles, or null when the source does not report a count. */
+  total: number | null;
+  source: string;
+  /** Largest offset the source accepts, or null when unbounded. */
+  maxOffset: number | null;
+  titles: (SourceTitle & { libraryId: string })[];
+}
+
+export async function discover(params: DiscoverParams): Promise<DiscoverResult> {
   const provider = getProvider(params.source);
   const { titles, total } = await provider.search(params);
   return {
     total,
     source: provider.id,
+    maxOffset: provider.maxOffset,
     titles: titles.map((t) => ({ ...t, libraryId: encodeId(provider.id, t.id) })),
   };
 }

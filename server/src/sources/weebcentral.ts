@@ -116,6 +116,7 @@ export const weebcentralProvider: SourceProvider = {
   id: 'weebcentral',
   label: 'WeebCentral',
   browsable: true,
+  maxOffset: null,
 
   async search(params: SourceSearch) {
     const limit = Math.min(50, Math.max(1, params.limit ?? 24));
@@ -130,11 +131,8 @@ export const weebcentralProvider: SourceProvider = {
     });
 
     const html = await getHtml(`${BASE}/search/data?${query.toString()}`);
-    const titles = parseSearchResults(html);
-    // The site reports no result count; claim another page whenever this one
-    // came back full, which is what the pager actually needs.
-    const total = offset + titles.length + (titles.length >= limit ? limit : 0);
-    return { total, titles };
+    // The site reports no result count anywhere, so the pager runs blind.
+    return { total: null, titles: parseSearchResults(html) };
   },
 
   async getTitle(id: string): Promise<SourceTitle | null> {

@@ -46,6 +46,8 @@ export const mangadexProvider: SourceProvider = {
   id: 'mangadex',
   label: 'MangaDex',
   browsable: true,
+  // `Collections offset query param may not be >10000`.
+  maxOffset: 10000,
 
   async search(params: SourceSearch) {
     const { titles, total } = await searchManga({
