@@ -1,0 +1,125 @@
+import Database from 'better-sqlite3';
+import path from 'node:path';
+import { ensureDirs, dbPath, coverDir, dataDir } from './config';
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS titles (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL DEFAULT 'mangadex',
+  provider_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  alt_titles TEXT,
+  original_lang TEXT,
+  synopsis TEXT,
+  status TEXT,
+  year INTEGER,
+  author TEXT,
+  content_rating TEXT,
+  tags TEXT,
+  cover_local TEXT,
+  jikan_id INTEGER,
+  jikan_score REAL,
+  jikan_payload TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS chapters (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL DEFAULT 'mangadex',
+  provider_id TEXT NOT NULL,
+  title_id TEXT NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+  chapter_number TEXT,
+  chapter_title TEXT,
+  volume TEXT,
+  language TEXT,
+  pages INTEGER,
+  external_url TEXT,
+  published_at TEXT,
+  scanlator TEXT,
+  downloaded INTEGER NOT NULL DEFAULT 0,
+  download_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_chapters_title ON chapters(title_id, chapter_number);
+
+CREATE TABLE IF NOT EXISTS pages (
+  chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+  page_number INTEGER NOT NULL,
+  file_name TEXT,
+  local_path TEXT,
+  size INTEGER,
+  downloaded INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (chapter_id, page_number)
+);
+
+CREATE TABLE IF NOT EXISTS reading_progress (
+  title_id TEXT PRIMARY KEY REFERENCES titles(id) ON DELETE CASCADE,
+  chapter_id TEXT NOT NULL,
+  page INTEGER NOT NULL DEFAULT 0,
+  mode TEXT NOT NULL DEFAULT 'scroll',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS sync_state (
+  title_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  state TEXT,
+  PRIMARY KEY (title_id, kind)
+);
+`;
+
+let db: Database.Database | null = null;
+
+export function getDb(): Database.Database {
+  if (db) return db;
+  ensureDirs();
+  db = new Database(dbPath);
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  migrate(db);
+  return db;
+}
+
+function migrate(db: Database.Database): void {
+  const version = db.pragma('user_version', { simple: true }) as number;
+  if (version < 1) {
+    db.exec(SCHEMA);
+    db.pragma('user_version = 1');
+  }
+}
+
+export { coverDir, dataDir };
+
+export type ChaptersSort = 'asc' | 'desc';
+
+export interface ChapterRow {
+  id: string;
+  provider_id: string;
+  title_id: string;
+  chapter_number: string | null;
+  chapter_title: string | null;
+  volume: string | null;
+  language: string | null;
+  pages: number | null;
+  external_url: string | null;
+  published_at: string | null;
+  scanlator: string | null;
+  downloaded: number;
+  download_error: string | null;
+  local_path: string | null;
+}
+
+/** Resolve the data subdirectory that holds a chapter's downloaded pages. */
+export function chapterDir(titleId: string, chapterId: string): string {
+  return path.join(dataDir, titleId, chapterId);
+}

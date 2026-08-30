@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+library/
+*.log
+*.pid
+errors.txt
+.env
+.env.local
+.DS_Store
+.venv*/
+server/.venv-mangaocr/
+.huggingface/
+.cache/

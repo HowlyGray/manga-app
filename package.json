@@ -1,0 +1,21 @@
+{
+  "name": "manga-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local manga/manhwa library app powered by the MangaDex public API",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,magenta \"npm run dev -w server\" \"npm run dev -w web\"",
+    "dev:server": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "sync": "npm run sync -w server",
+    "build": "npm run build -w web",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  }
+}
