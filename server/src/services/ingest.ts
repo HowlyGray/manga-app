@@ -5,6 +5,7 @@ import { coverThumbUrl, downloadImage, getManga, listChapters, searchManga, type
 import { searchMangaMeta } from '../api/jikan';
 import * as lib from './library';
 import { downloadChapter } from '../downloader';
+import { languageRanker } from './lang';
 
 const MAIN_KEYS = ['en', 'ja-ro', 'ko', 'ja', 'pt-br', 'es'];
 
@@ -205,12 +206,41 @@ export interface DownloadTitleResult {
   skipped: number;
 }
 
+/**
+ * Picks one chapter per chapter number.
+ *
+ * A title can carry the same chapter in several languages. What is already on
+ * disk wins, so re-running a download never duplicates the library; otherwise
+ * the language the OCR chain reads best wins.
+ */
+function pickOnePerChapter(chapters: lib.ChapterRecord[]): lib.ChapterRecord[] {
+  const rank = languageRanker(config.translate.chapterLanguages);
+  const best = new Map<string, lib.ChapterRecord>();
+  for (const ch of chapters) {
+    const key = ch.chapter_number ?? ch.id;
+    const current = best.get(key);
+    if (!current) {
+      best.set(key, ch);
+      continue;
+    }
+    const currentHave = current.downloaded === 1;
+    const candidateHave = ch.downloaded === 1;
+    if (candidateHave !== currentHave) {
+      if (candidateHave) best.set(key, ch);
+    } else if (rank(ch.language) < rank(current.language)) {
+      best.set(key, ch);
+    }
+  }
+  const keep = new Set(best.values());
+  return chapters.filter((c) => keep.has(c));
+}
+
 /** Downloads all chapters of a title that aren't already downloaded. */
 export async function downloadTitle(
   titleId: string,
   onChapter?: (c: { chapterId: string; downloaded: number; failed: number; index: number; total: number }) => void,
 ): Promise<DownloadTitleResult> {
-  const chapters = lib.listChapters(titleId, 'asc');
+  const chapters = pickOnePerChapter(lib.listChapters(titleId, 'asc'));
   const result: DownloadTitleResult = { titleId, attempted: 0, downloaded: 0, failed: 0, skipped: 0 };
   for (let i = 0; i < chapters.length; i++) {
     const ch = chapters[i];

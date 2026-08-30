@@ -144,3 +144,44 @@ export function targetScript(target: string): Script {
 export function wrapsAnywhere(script: Script): boolean {
   return script === 'jpn' || script === 'cjk';
 }
+
+/**
+ * How well the OCR + translation chain handles a language, 0 being best.
+ *
+ * This is a property of *our* pipeline, not of the language: English wins
+ * because both tesseract and every MT engine are strongest there, Japanese
+ * ranks above Korean and Chinese because manga-ocr is purpose-built for it,
+ * and scripts with weak traineddata come last however common they are.
+ */
+export function pipelineRank(code: string | null | undefined): number {
+  const spec = langSpec(code);
+  if (spec.code === 'en') return 0;
+  switch (spec.script) {
+    case 'latin':
+      // A DeepL source code is a good proxy for "well-supported everywhere";
+      // without one the OCR is still easy but the translation is Google-only.
+      return spec.deepl ? 1 : 3;
+    case 'jpn':
+      // manga-ocr is purpose-built for this and beats tesseract on any script.
+      return 2;
+    case 'cyrillic':
+      return 4;
+    case 'cjk':
+      return 5;
+    default:
+      return 6;
+  }
+}
+
+/**
+ * Builds a comparator key over chapter languages: entries in `preferred` win in
+ * the order given, everything else falls back to how well the pipeline reads it.
+ */
+export function languageRanker(preferred: string[]): (code: string | null | undefined) => number {
+  const explicit = new Map(preferred.map((c, i) => [c.trim().toLowerCase(), i]));
+  return (code) => {
+    const key = (code ?? '').trim().toLowerCase();
+    const hit = explicit.get(key) ?? explicit.get(key.split('-')[0]);
+    return hit !== undefined ? hit : preferred.length + pipelineRank(key);
+  };
+}

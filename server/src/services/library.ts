@@ -1,6 +1,8 @@
 import type Database from 'better-sqlite3';
 import path from 'node:path';
+import { config } from '../config';
 import { getDb } from '../db';
+import { languageRanker } from './lang';
 
 export interface TitleRecord {
   id: string;
@@ -256,7 +258,7 @@ export function listChapters(titleId: string, sort: 'asc' | 'desc' = 'asc'): Cha
   return rows.map(rowToChapter);
 }
 
-/** Distinct chapter languages present for a title, most common first. */
+/** Distinct chapter languages for a title, the ones we read best listed first. */
 export function listLanguages(titleId: string): string[] {
   const db = getDb();
   const rows = db
@@ -266,7 +268,10 @@ export function listLanguages(titleId: string): string[] {
        GROUP BY language ORDER BY n DESC`,
     )
     .all(titleId) as { language: string; n: number }[];
-  return rows.map((r) => r.language);
+  const rank = languageRanker(config.translate.chapterLanguages);
+  return rows
+    .sort((a, b) => rank(a.language) - rank(b.language) || b.n - a.n)
+    .map((r) => r.language);
 }
 
 /** Optional language filter for a title's chapter list. */

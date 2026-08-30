@@ -46,7 +46,9 @@ page → detect regions → recognize → group into bubbles → translate page
 
 1. **Pick the source language.** It comes from the *chapter*, not the title: a
    title whose `original_lang` is `ja` is routinely read through a Georgian or
-   English scanlation, and OCR has to follow what is actually printed.
+   English scanlation, and OCR has to follow what is actually printed. When a
+   chapter exists in several languages, the one the chain reads best is chosen
+   — see *Chapter language preference* below.
 2. **Detect** text regions with RapidOCR. The detector is script-agnostic and
    returns tight per-line boxes; whole-page tesseract layout analysis is used
    only as a fallback, because on comics it merges text across panel borders.
@@ -75,6 +77,28 @@ Results are cached under the chapter folder (`.ocr/` for OCR JSON, `.trl/` for
 the layout JSON and rendered PNGs), so nothing is re-translated unless you clear
 the cache. Cache names carry a pipeline version; after an upgrade the old files
 are simply ignored, and `.trl/` can be deleted at any time.
+
+## Chapter language preference
+
+A series often exists in several fan translations, and which one you download
+decides how good the machine translation can be: English and the major Latin
+languages OCR cleanly and translate well, Japanese has a purpose-built
+recognition model, while Georgian, Hebrew, Thai and Arabic have weak
+traineddata and produce partial readings at best.
+
+The app therefore keeps one chapter per chapter number, choosing the language
+it reads best. The default order is English, then Latin languages DeepL
+supports, then Japanese, then Latin languages it does not, then Cyrillic, then
+Chinese and Korean, then everything else. Override it with `DOWNLOAD_LANGS`:
+
+```bash
+DOWNLOAD_LANGS=pt-br,es,en npm run dev
+```
+
+This only decides *which* translation gets downloaded; it is unrelated to the
+target language you read in. Chapters already on disk are never re-downloaded
+because a better language showed up — re-import the title and pick the language
+you want from the chapter list.
 
 ## Requirements
 
@@ -167,6 +191,7 @@ npm run sync -w server -- <command> [options]
 | `TRANSLATE_LLM_EFFORT`  | `low`        | `low` / `medium` / `high` — bubble translation is a short task |
 | `DEEPL_API_KEY`         | –            | `…:fx` free key → `api-free.deepl.com`, otherwise pro API      |
 | `DEEPL_API_URL`         | –            | Override the DeepL base URL                                    |
+| `DOWNLOAD_LANGS`        | –            | Preferred chapter languages, best first (e.g. `pt-br,es,en`)   |
 | `TRANSLATE_SRC`         | `ja`         | Source language **only** for chapters with no language set     |
 | `TRANSLATE_MIN_CONF`    | `55`         | Drop OCR lines below this confidence (0-100)                   |
 | `TRANSLATE_REFINE`      | `1`          | `0` disables the whole-balloon re-read pass                     |

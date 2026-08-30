@@ -38,6 +38,13 @@ export const config = {
       // whole-chapter runs affordable without hurting the result.
       effort: (process.env.TRANSLATE_LLM_EFFORT ?? 'low') as 'low' | 'medium' | 'high',
     },
+    // Preferred chapter languages, best first. Only affects which translation
+    // of a chapter gets picked when several exist; anything unlisted falls back
+    // to how well the OCR chain reads it (see services/lang.ts).
+    chapterLanguages: (process.env.DOWNLOAD_LANGS ?? '')
+      .split(',')
+      .map((c) => c.trim())
+      .filter(Boolean),
     // Fallback source language, used only when a chapter has no language set.
     // (The chapter's own language is what drives OCR — see services/lang.ts.)
     defaultSource: process.env.TRANSLATE_SRC ?? 'ja',

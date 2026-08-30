@@ -298,6 +298,7 @@ apiRouter.get('/translate/languages', (_req, res) => {
     targets: config.translate.targets,
     defaultSource: config.translate.defaultSource,
     llm: isLlmConfigured(),
+    chapterLanguages: config.translate.chapterLanguages,
   });
 });
 

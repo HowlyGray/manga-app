@@ -1,4 +1,5 @@
 import { config } from '../config';
+import { languageRanker } from '../services/lang';
 import { RateLimiter, fetchWithRetry, getJson } from '../util/net';
 
 const BASE = 'https://api.mangadex.org';
@@ -229,8 +230,12 @@ export type ChapterSort = 'asc' | 'desc';
 
 /**
  * Returns usable (downloadable) chapters for a manga: no external license
- * redirect and at least one page. Prefers English translations; if a series
- * has very few English chapters, keeps the remaining languages too.
+ * redirect and at least one page, one per chapter number.
+ *
+ * Which translation wins matters more than it looks: after the 2025 takedowns
+ * many series only survive in minor languages, and picking the wrong one feeds
+ * the translator a scan it can barely read. Solo Leveling was being downloaded
+ * in Georgian while a Portuguese release sat next to it.
  */
 export async function listChapters(
   mangaId: string,
@@ -262,14 +267,10 @@ export async function listChapters(
     offset += batch.length;
   }
 
-  const enCount = all.filter((c) => c.language === 'en').length;
-  const preferEnOnly = enCount >= 3 && enCount / all.length > 0.5;
-  const kept = preferEnOnly ? all.filter((c) => c.language === 'en') : all;
-
-  const langRank: Record<string, number> = { en: 0, ko: 1, ja: 2 };
+  const rank = languageRanker(config.translate.chapterLanguages);
   const seen = new Set<string>();
-  const deduped = [...kept]
-    .sort((a, b) => (langRank[a.language] ?? 9) - (langRank[b.language] ?? 9))
+  const deduped = [...all]
+    .sort((a, b) => rank(a.language) - rank(b.language))
     .filter((c) => {
       const key = c.chapter ?? c.id;
       if (seen.has(key)) return false;
