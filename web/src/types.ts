@@ -1,5 +1,7 @@
 export interface DiscoverItem {
   id: string;
+  /** Provider the result came from. */
+  source?: string;
   title: string;
   altTitles: string[];
   originalLanguage: string | null;
@@ -11,10 +13,48 @@ export interface DiscoverItem {
 }
 
 export interface DiscoverResponse {
-  total: number;
+  /** Matching titles, or null when the source reports no count. */
+  total: number | null;
   page: number;
   limit: number;
+  /** Addressable pages; 0 when unknown. */
+  pages: number;
+  hasMore: boolean;
+  source: string;
   titles: DiscoverItem[];
+}
+
+export interface SourceInfo {
+  id: string;
+  label: string;
+  browsable: boolean;
+  /** The source can filter by genre/theme tags. */
+  hasTags: boolean;
+  /** The source has featured rows for the home page. */
+  hasShelves: boolean;
+}
+
+export interface Tag {
+  id: string;
+  name: string;
+  /** `genre`, `theme`, `format`, `content`. */
+  group: string;
+}
+
+export type SearchSort = 'popular' | 'latest' | 'newest' | 'rating' | 'relevance' | 'title';
+
+export interface Shelf {
+  id: string;
+  title: string;
+  subtitle: string;
+  /** Filters that reproduce the shelf in the browse view. */
+  browse: { sort?: SearchSort; createdSince?: string } | null;
+  titles: DiscoverItem[];
+}
+
+export interface HomeResponse {
+  source: string;
+  shelves: Shelf[];
 }
 
 export interface LibraryTitle {
@@ -44,6 +84,8 @@ export interface ChapterView {
   title: string | null;
   volume: string | null;
   language: string;
+  /** Human-readable name of the language printed on the pages. */
+  languageLabel?: string;
   pages: number | null;
   scanlator: string | null;
   publishedAt: string | null;
@@ -99,6 +141,8 @@ export interface PageView {
 }
 
 export interface ChapterDetailResponse {
+  /** True when the pages stream from the source and nothing is stored. */
+  preview?: boolean;
   chapter: ChapterView & { downloading: boolean };
   pages: PageView[];
 }
@@ -117,4 +161,52 @@ export interface ChapterTranslateState {
   failed: number;
   pages: ChapterTranslatePage[];
   error?: string;
+}
+/** One speech bubble, positioned in the original page's pixel coordinates. */
+export interface OverlayBlock {
+  id: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  /** Layout box: the bubble interior when one was detected. */
+  rx0: number;
+  ry0: number;
+  rx1: number;
+  ry1: number;
+  /** Recognized source text, shown on hover. */
+  source: string;
+  text: string;
+  vertical: boolean;
+  inBubble: boolean;
+  fill: string;
+  color: string;
+  fontSize: number;
+  lineHeight: number;
+  lines: string[];
+  /** Mean OCR confidence over the block, 0-100. */
+  confidence: number;
+  /** The reading is not trustworthy and is marked as such in the reader. */
+  uncertain: boolean;
+}
+
+export interface PageOverlay {
+  v: number;
+  width: number;
+  height: number;
+  sourceLang: string;
+  sourceLabel: string;
+  targetLang: string;
+  engine: string;
+  provider: 'claude' | 'deepl' | 'google' | 'none';
+  translated: boolean;
+  reason?: 'same-language' | 'no-text';
+  blocks: OverlayBlock[];
+}
+
+export interface TranslateLanguages {
+  targets: string[];
+  defaultSource: string;
+  /** A context-aware LLM provider is configured server-side. */
+  llm: boolean;
 }

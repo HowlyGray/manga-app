@@ -13,6 +13,7 @@
     "dev:web": "npm run dev -w web",
     "sync": "npm run sync -w server",
     "build": "npm run build -w web",
+    "serve": "npm run build && npm start -w server",
     "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
   },
   "devDependencies": {

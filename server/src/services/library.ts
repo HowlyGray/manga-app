@@ -1,6 +1,9 @@
 import type Database from 'better-sqlite3';
+import fs from 'node:fs';
 import path from 'node:path';
-import { getDb } from '../db';
+import { config } from '../config';
+import { chapterDir, getDb } from '../db';
+import { languageRanker } from './lang';
 
 export interface TitleRecord {
   id: string;
@@ -31,6 +34,7 @@ export interface LibraryTitle extends TitleRecord {
 
 export interface ChapterRecord {
   id: string;
+  provider: string;
   provider_id: string;
   title_id: string;
   chapter_number: string | null;
@@ -78,6 +82,7 @@ function rowToTitle(row: Record<string, unknown>): TitleRecord {
 function rowToChapter(row: Record<string, unknown>): ChapterRecord {
   return {
     id: row.id as string,
+    provider: (row.provider as string) ?? 'mangadex',
     provider_id: row.provider_id as string,
     title_id: row.title_id as string,
     chapter_number: (row.chapter_number as string) ?? null,
@@ -202,6 +207,7 @@ export function listLibrary(): LibraryTitle[] {
 
 export function upsertChapter(ch: {
   id: string;
+  provider?: string;
   providerId: string;
   titleId: string;
   chapterNumber: string | null;
@@ -217,7 +223,7 @@ export function upsertChapter(ch: {
   db.prepare(
     `INSERT INTO chapters (id, provider, provider_id, title_id, chapter_number, chapter_title,
      volume, language, pages, external_url, published_at, scanlator)
-     VALUES (@id, 'mangadex', @provider_id, @title_id, @chapter_number, @chapter_title,
+     VALUES (@id, @provider, @provider_id, @title_id, @chapter_number, @chapter_title,
              @volume, @language, @pages, @external_url, @published_at, @scanlator)
      ON CONFLICT(id) DO UPDATE SET
        chapter_number = excluded.chapter_number,
@@ -231,6 +237,7 @@ export function upsertChapter(ch: {
        updated_at = datetime('now')`,
   ).run({
     id: ch.id,
+    provider: ch.provider ?? 'mangadex',
     provider_id: ch.providerId,
     title_id: ch.titleId,
     chapter_number: ch.chapterNumber,
@@ -256,7 +263,7 @@ export function listChapters(titleId: string, sort: 'asc' | 'desc' = 'asc'): Cha
   return rows.map(rowToChapter);
 }
 
-/** Distinct chapter languages present for a title, most common first. */
+/** Distinct chapter languages for a title, the ones we read best listed first. */
 export function listLanguages(titleId: string): string[] {
   const db = getDb();
   const rows = db
@@ -266,7 +273,10 @@ export function listLanguages(titleId: string): string[] {
        GROUP BY language ORDER BY n DESC`,
     )
     .all(titleId) as { language: string; n: number }[];
-  return rows.map((r) => r.language);
+  const rank = languageRanker(config.translate.chapterLanguages);
+  return rows
+    .sort((a, b) => rank(a.language) - rank(b.language) || b.n - a.n)
+    .map((r) => r.language);
 }
 
 /** Optional language filter for a title's chapter list. */
@@ -300,25 +310,59 @@ export function setChapterDownloaded(
   ).run({ id: chapterId, downloaded, error: error ?? null });
 }
 
+/**
+ * Records the page list for a chapter, keeping whatever is already downloaded.
+ *
+ * This used to DELETE every row and re-insert, which threw away `local_path`
+ * for files still sitting on disk. Re-running a download then had a window
+ * where the library pointed at nothing until each page was re-marked, and a
+ * crash or restart inside it left the chapter permanently unreadable with all
+ * of its images present.
+ */
 export function replaceChapterPages(
   chapterId: string,
   pageCount: number | null,
   files: string[],
 ): void {
   const db = getDb();
-  db.prepare('DELETE FROM pages WHERE chapter_id = ?').run(chapterId);
-  const insert = db.prepare(
-    `INSERT INTO pages (chapter_id, page_number, file_name) VALUES (?, ?, ?)`,
+  const upsert = db.prepare(
+    `INSERT INTO pages (chapter_id, page_number, file_name) VALUES (?, ?, ?)
+     ON CONFLICT(chapter_id, page_number) DO UPDATE SET file_name = excluded.file_name`,
   );
-  const tx = db.transaction((items: [string, number, string][]) => {
-    for (const [cid, num, name] of items) insert.run(cid, num, name);
+  const trim = db.prepare('DELETE FROM pages WHERE chapter_id = ? AND page_number > ?');
+  const tx = db.transaction((names: string[]) => {
+    names.forEach((name, i) => upsert.run(chapterId, i + 1, name));
+    // Only pages that no longer exist upstream are removed.
+    trim.run(chapterId, names.length);
   });
-  tx(
-    files.map((f, i) => [chapterId, i + 1, f] as [string, number, string]),
-  );
+  tx(files);
   if (pageCount != null) {
     db.prepare('UPDATE chapters SET pages = ? WHERE id = ?').run(pageCount, chapterId);
   }
+}
+
+/**
+ * On-disk file for a page, repairing the row when the database lost track of a
+ * file that is still there. Pages are written as `0001.png`, `0002.jpg`, … so
+ * the name can be recovered from the page number alone.
+ */
+export function pageFile(titleId: string, chapterId: string, pageNumber: number): string | null {
+  const known = listPages(chapterId).find((p) => p.page_number === pageNumber)?.local_path;
+  if (known && fs.existsSync(known)) return known;
+
+  const dir = chapterDir(titleId, chapterId);
+  const prefix = String(pageNumber).padStart(4, '0');
+  let match: string | undefined;
+  try {
+    match = fs.readdirSync(dir).find((f) => f.startsWith(`${prefix}.`));
+  } catch {
+    return null;
+  }
+  if (!match) return null;
+
+  const local = path.join(dir, match);
+  markPageDownloaded(chapterId, pageNumber, local, null);
+  return local;
 }
 
 export function markPageDownloaded(chapterId: string, pageNumber: number, localPath: string, size: number | null): void {

@@ -90,11 +90,54 @@ export function getDb(): Database.Database {
   return db;
 }
 
+/**
+ * Everything a source told us about a title, kept so browsing the same page
+ * twice does not re-fetch it. `kind` separates the title record from its
+ * chapter index, which goes stale much faster.
+ */
+const CACHE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS source_cache (
+  id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (id, kind)
+);
+`;
+
+/**
+ * Readings the user has fixed by hand, reused on every later page.
+ *
+ * OCR misreads the same lettering the same way throughout a series, so one
+ * correction pays off repeatedly — this is the only form of "training" the app
+ * does, and it is the user's own, not a model's.
+ */
+const CORRECTION_SCHEMA = `
+CREATE TABLE IF NOT EXISTS corrections (
+  source_lang TEXT NOT NULL,
+  source_text TEXT NOT NULL,
+  corrected_text TEXT NOT NULL,
+  hits INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (source_lang, source_text)
+);
+`;
+
 function migrate(db: Database.Database): void {
   const version = db.pragma('user_version', { simple: true }) as number;
   if (version < 1) {
     db.exec(SCHEMA);
     db.pragma('user_version = 1');
+  }
+  // A new table in SCHEMA alone would never reach an existing database, since
+  // that block only runs once.
+  if (version < 2) {
+    db.exec(CACHE_SCHEMA);
+    db.pragma('user_version = 2');
+  }
+  if (version < 3) {
+    db.exec(CORRECTION_SCHEMA);
+    db.pragma('user_version = 3');
   }
 }
 
@@ -119,7 +162,16 @@ export interface ChapterRow {
   local_path: string | null;
 }
 
+/**
+ * Makes a library id safe to use as a path segment. Ids from sources other than
+ * MangaDex carry a `provider:` prefix, and a colon is not a legal filename
+ * character on Windows. MangaDex UUIDs pass through unchanged.
+ */
+export function pathSegment(id: string): string {
+  return id.replace(/[^\w.-]+/g, '_');
+}
+
 /** Resolve the data subdirectory that holds a chapter's downloaded pages. */
 export function chapterDir(titleId: string, chapterId: string): string {
-  return path.join(dataDir, titleId, chapterId);
+  return path.join(dataDir, pathSegment(titleId), pathSegment(chapterId));
 }

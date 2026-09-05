@@ -1,16 +1,33 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
-import type { ChapterDetailResponse, ChapterView, PageView, TitleDetailResponse } from '../types';
+import PageFrame from '../components/PageFrame';
+import { usePageOverlays } from '../hooks';
+import type {
+  ChapterDetailResponse,
+  ChapterView,
+  PageView,
+  TitleDetailResponse,
+  TranslateLanguages,
+} from '../types';
 
 type Mode = 'page' | 'scroll';
+/** How translated text is presented: live HTML, or the flattened PNG. */
+type TextMode = 'overlay' | 'baked';
 
 function labelOf(c: ChapterView | null | undefined): string {
   if (!c) return '—';
   return c.chapter ? `Ch. ${c.chapter}${c.title ? ` · ${c.title}` : ''}` : 'One-shot';
 }
 
-const TARGET_LANGS = ['EN', 'FR', 'DE', 'ES', 'PT-BR', 'IT', 'NL', 'PL', 'RU', 'KO', 'JA', 'ZH-HANS', 'ZH-HANT', 'TR', 'ID'];
+const FALLBACK_TARGETS = ['EN', 'FR', 'DE', 'ES', 'PT-BR', 'IT', 'NL', 'PL', 'RU', 'KO', 'JA', 'ZH-HANS', 'ZH-HANT', 'TR', 'ID'];
+
+const PROVIDER_LABEL: Record<string, string> = {
+  claude: 'Claude',
+  deepl: 'DeepL',
+  google: 'Google',
+  none: '—',
+};
 
 export default function Reader() {
   const { id, chapterId } = useParams();
@@ -22,34 +39,56 @@ export default function Reader() {
   const [pageIndex, setPageIndex] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState('');
-  const [retry, setRetry] = useState(0);
+  /** Pages are streaming from the source; nothing is stored locally. */
+  const [preview, setPreview] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const [languages, setLanguages] = useState<TranslateLanguages | null>(null);
   const [translateLang, setTranslateLang] = useState('');
-  const [translateHint, setTranslateHint] = useState('');
+  const [textMode, setTextMode] = useState<TextMode>('overlay');
+  const [showOriginal, setShowOriginal] = useState(false);
 
   const imgRefs = useRef<(HTMLImageElement | null)[]>([]);
   const saveTimer = useRef<number | undefined>(undefined);
-  const downloadStarted = useRef(false);
   const restored = useRef(false);
+
+  const overlayActive = Boolean(translateLang) && textMode === 'overlay';
+  const { states: overlays, request: requestOverlay, refresh: refreshOverlay } = usePageOverlays(
+    id,
+    chapterId,
+    overlayActive ? translateLang : '',
+  );
+
+  useEffect(() => {
+    api.translateLanguages().then(setLanguages, () => setLanguages(null));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     setDetail(null);
     setError('');
-    downloadStarted.current = false;
     restored.current = false;
     if (!id || !chapterId) return;
 
     (async () => {
       try {
-        let ti = await api.title(id!);
-        if (!ti.inLibrary) {
-          await api.importTitle(id!);
-          ti = await api.title(id!);
-        }
-        const ch = await api.chapter(id!, chapterId!);
+        const ti = await api.title(id!);
         if (cancelled) return;
         setTitleInfo(ti);
-        setDetail(ch);
+
+        // Only a chapter that is actually on disk is read locally. Everything
+        // else streams from the source, so a title can be sampled before it is
+        // imported and before anything is downloaded.
+        const local = ti.inLibrary ? await api.chapter(id!, chapterId!).catch(() => null) : null;
+        if (cancelled) return;
+
+        if (local && local.chapter.downloaded === 1) {
+          setDetail(local);
+          setPreview(false);
+        } else {
+          setDetail(await api.previewChapter(id!, chapterId!));
+          setPreview(true);
+        }
         if (ti.progress?.chapter_id === chapterId) {
           setMode(ti.progress.mode === 'page' ? 'page' : 'scroll');
         }
@@ -62,52 +101,68 @@ export default function Reader() {
     };
   }, [id, chapterId]);
 
-  // Auto-download the chapter when opened and not yet local.
-  useEffect(() => {
-    if (!id || !chapterId || !detail) return;
-    if (detail.chapter.downloaded === 1 || downloadStarted.current) return;
-
-    downloadStarted.current = true;
+  /**
+   * Saves the chapter locally: imports the title if needed, downloads every
+   * page, then swaps the reader over to the stored copy.
+   */
+  async function saveChapter() {
+    if (!id || !chapterId || saving) return;
+    setSaving(true);
     setDownloading(true);
     setError('');
-    (async () => {
-      try {
-        await api.downloadChapter(id!, chapterId!);
-        const poll = window.setInterval(async () => {
-          const ch = await api.chapter(id!, chapterId!).catch(() => null);
-          if (!ch) return;
-          if (ch.chapter.downloaded === 1) {
-            window.clearInterval(poll);
-            setDetail(ch);
-            setDownloading(false);
-            window.scrollTo(0, 0);
-          } else if (ch.chapter.downloaded === -1) {
-            window.clearInterval(poll);
-            setDetail(ch);
-            setDownloading(false);
-            setError(`Download failed: ${ch.chapter.downloadError ?? 'unknown'}`);
-          }
-        }, 2000);
-      } catch (e) {
-        setDownloading(false);
-        setError((e as Error).message);
-      }
-    })();
-  }, [id, chapterId, detail, retry]);
+    try {
+      await api.downloadChapter(id, chapterId);
+      const poll = window.setInterval(async () => {
+        const ch = await api.chapter(id, chapterId).catch(() => null);
+        if (!ch) return;
+        if (ch.chapter.downloaded === 1) {
+          window.clearInterval(poll);
+          setDetail(ch);
+          setPreview(false);
+          setDownloading(false);
+          setSaving(false);
+          api.title(id).then(setTitleInfo, () => {});
+        } else if (ch.chapter.downloaded === -1) {
+          window.clearInterval(poll);
+          setDownloading(false);
+          setSaving(false);
+          setError(`Download failed: ${ch.chapter.downloadError ?? 'unknown'}`);
+        }
+      }, 2000);
+    } catch (e) {
+      setDownloading(false);
+      setSaving(false);
+      setError((e as Error).message);
+    }
+  }
 
   const pages = detail?.pages ?? [];
   const downloaded = detail?.chapter.downloaded === 1;
-  const ready = downloaded && pages.length > 0;
+  const ready = pages.length > 0;
+  const targets = languages?.targets ?? FALLBACK_TARGETS;
 
   function pageUrl(p: PageView): string {
-    return translateLang ? `/api/translate/${id}/${chapterId}/${p.pageNumber}?target=${translateLang}` : p.url;
+    // Overlay mode starts from the untouched scan; only the baked view asks the
+    // server to flatten the translation into the image.
+    if (translateLang && textMode === 'baked') {
+      return `/api/translate/${id}/${chapterId}/${p.pageNumber}?target=${translateLang}`;
+    }
+    return p.url;
   }
 
-  function onTranslate(lang: string) {
-    setTranslateLang(lang);
-    setTranslateHint(lang ? 'Translating pages…' : '');
-    window.setTimeout(() => setTranslateHint(''), 5000);
+  /** Erased page that sits under the HTML text layer. */
+  function cleanUrl(p: PageView): string | undefined {
+    if (!overlayActive) return undefined;
+    return `/api/translate/${id}/${chapterId}/${p.pageNumber}/clean?target=${translateLang}`;
   }
+
+  /** First loaded overlay, used to report what the pipeline actually did. */
+  const overlayInfo = useMemo(() => {
+    for (const state of overlays.values()) {
+      if (state.status === 'ready') return state.overlay;
+    }
+    return null;
+  }, [overlays]);
 
   // Restore scroll position for the same chapter (best effort while images load).
   useEffect(() => {
@@ -188,6 +243,8 @@ export default function Reader() {
     );
   }
 
+  const sourceLabel = detail.chapter.languageLabel ?? detail.chapter.language;
+
   return (
     <div className="reader">
       <div className="reader-top">
@@ -203,23 +260,90 @@ export default function Reader() {
           <button className={mode === 'scroll' ? 'active' : ''} onClick={() => setMode('scroll')}>
             Scroll
           </button>
-          <select
-            className="chip"
-            value={translateLang}
-            onChange={(e) => onTranslate(e.target.value)}
-            title="Translate page text"
-          >
-            <option value="">Translate: Off</option>
-            {TARGET_LANGS.map((l) => (
-              <option key={l} value={l}>
-                Translate → {l}
-              </option>
-            ))}
-          </select>
         </div>
       </div>
 
-      {translateHint && <div className="notice">{translateHint}</div>}
+      <div className="reader-translate">
+        <label>
+          <span className="muted">Translate</span>
+          <select
+            className="chip"
+            value={translateLang}
+            disabled={preview}
+            onChange={(e) => setTranslateLang(e.target.value)}
+            title={
+              preview
+                ? 'Download this chapter to translate it — the pipeline works on local files'
+                : `Text on these pages: ${sourceLabel}`
+            }
+          >
+            <option value="">Off</option>
+            {targets.map((l) => (
+              <option key={l} value={l}>
+                {sourceLabel} → {l}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {translateLang && (
+          <>
+            <div className="reader-mode">
+              <button
+                className={textMode === 'overlay' ? 'active' : ''}
+                onClick={() => setTextMode('overlay')}
+                title="Live text over the cleaned scan: selectable and sharp at any zoom"
+              >
+                Overlay
+              </button>
+              <button
+                className={textMode === 'baked' ? 'active' : ''}
+                onClick={() => setTextMode('baked')}
+                title="Flattened page rendered server-side, ready to export"
+              >
+                Image
+              </button>
+            </div>
+
+            {textMode === 'overlay' && (
+              <button
+                className={`btn small${showOriginal ? ' primary' : ''}`}
+                onMouseDown={() => setShowOriginal(true)}
+                onMouseUp={() => setShowOriginal(false)}
+                onMouseLeave={() => setShowOriginal(false)}
+                onClick={() => setShowOriginal((v) => !v)}
+                title="Hide the translation and show the original lettering"
+              >
+                {showOriginal ? 'Showing original' : 'Show original'}
+              </button>
+            )}
+          </>
+        )}
+
+        {translateLang && overlayInfo && (
+          <span className="muted small">
+            {sourceLabel} → {translateLang} · OCR {overlayInfo.engine} ·{' '}
+            {PROVIDER_LABEL[overlayInfo.provider] ?? overlayInfo.provider}
+          </span>
+        )}
+        {translateLang && languages && !languages.llm && (
+          <span className="muted small" title="Set ANTHROPIC_API_KEY to translate each page with its own context">
+            (no page context)
+          </span>
+        )}
+      </div>
+
+      {preview && !downloading && (
+        <div className="notice preview-bar">
+          <span>
+            <strong>Preview</strong> — streaming from{' '}
+            {titleInfo?.title.provider ?? 'the source'}. Nothing is saved on this machine.
+          </span>
+          <button className="btn small primary" onClick={saveChapter} disabled={saving}>
+            ⬇ Download this chapter
+          </button>
+        </div>
+      )}
 
       {downloading && (
         <div className="notice">
@@ -229,21 +353,23 @@ export default function Reader() {
       )}
       {error && <div className="error" style={{ marginBottom: 12 }}>{error}</div>}
 
-      {!downloaded && !downloading && (
-        <div className="notice">This chapter isn't downloaded yet.</div>
-      )}
-
       {mode === 'scroll' && ready && (
         <div className="reader-pages scroll">
           {pages.map((p) => (
-            <img
+            <PageFrame
               key={p.pageNumber}
-              ref={(el) => {
+              pageNumber={p.pageNumber}
+              src={pageUrl(p)}
+              cleanSrc={cleanUrl(p)}
+              alt={`page ${p.pageNumber}`}
+              lazy
+              overlay={overlayActive ? overlays.get(p.pageNumber) ?? null : null}
+              showOriginal={showOriginal}
+              onRequestOverlay={overlayActive ? requestOverlay : undefined}
+              onCorrected={overlayActive ? refreshOverlay : undefined}
+              imgRef={(el) => {
                 imgRefs.current[p.pageNumber - 1] = el;
               }}
-              src={pageUrl(p)}
-              alt={`page ${p.pageNumber}`}
-              loading="lazy"
             />
           ))}
         </div>
@@ -253,7 +379,17 @@ export default function Reader() {
         <>
           <div className="reader-pages page">
             <div className="click-left" onClick={() => setPageIndex((p) => Math.max(0, p - 1))} />
-            <img src={pageUrl(pages[pageIndex])} alt={`page ${pageIndex + 1}`} />
+            <PageFrame
+              key={pages[pageIndex].pageNumber}
+              pageNumber={pages[pageIndex].pageNumber}
+              src={pageUrl(pages[pageIndex])}
+              cleanSrc={cleanUrl(pages[pageIndex])}
+              alt={`page ${pageIndex + 1}`}
+              overlay={overlayActive ? overlays.get(pages[pageIndex].pageNumber) ?? null : null}
+              showOriginal={showOriginal}
+              onRequestOverlay={overlayActive ? requestOverlay : undefined}
+              onCorrected={overlayActive ? refreshOverlay : undefined}
+            />
             <div
               className="click-right"
               onClick={() => setPageIndex((p) => Math.min(pages.length - 1, p + 1))}
@@ -263,20 +399,6 @@ export default function Reader() {
             {pageIndex + 1} / {pages.length}
           </div>
         </>
-      )}
-
-      {!downloaded && !downloading && !error && (
-        <div>
-          <button
-            className="btn primary"
-            onClick={() => {
-              downloadStarted.current = false;
-              setRetry((r) => r + 1);
-            }}
-          >
-            Retry download
-          </button>
-        </div>
       )}
 
       <div className="reader-nav">

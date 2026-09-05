@@ -1,11 +1,17 @@
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { coverDir, config } from '../config';
 import * as ingest from '../services/ingest';
 import * as lib from '../services/library';
 import * as imgtranslator from '../services/imgtranslate';
-import { normalizeOcrSource } from '../services/translator';
+import { isLlmConfigured } from '../services/translator';
+import { langSpec } from '../services/lang';
+import { hasProvider, listProviders } from '../sources';
+import { coverFile } from '../services/sourceCache';
+import { previewChapterInfo, previewPages } from '../services/preview';
+import { deleteCorrection, listCorrections, saveCorrection } from '../services/corrections';
+import { decodeId, getProvider } from '../sources';
 import { downloadChapter } from '../downloader';
 import { getChapterTranslateStatus, startChapterTranslate } from '../services/chapterTranslate';
 
@@ -39,26 +45,131 @@ apiRouter.get('/ping', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
+/** Content sources the server can browse, and what each one supports. */
+apiRouter.get('/sources', (_req, res) => {
+  res.json({
+    sources: listProviders().map((p) => ({
+      id: p.id,
+      label: p.label,
+      browsable: p.browsable,
+      hasTags: typeof p.listTags === 'function',
+      hasShelves: typeof p.homeShelves === 'function',
+    })),
+  });
+});
+
+/** Genres, themes and formats a source can filter by. */
+apiRouter.get('/tags', async (req, res) => {
+  const source = typeof req.query.source === 'string' ? req.query.source : undefined;
+  if (source && !hasProvider(source)) {
+    return res.status(400).json({ error: `unknown source: ${source}` });
+  }
+  try {
+    res.json({ source: source ?? 'mangadex', tags: await ingest.sourceTags(source) });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[tags] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
+/** Featured rows for the home page. */
+apiRouter.get('/home', async (req, res) => {
+  const source = typeof req.query.source === 'string' ? req.query.source : undefined;
+  if (source && !hasProvider(source)) {
+    return res.status(400).json({ error: `unknown source: ${source}` });
+  }
+  try {
+    const { source: used, shelves } = await ingest.homeShelves(source);
+    res.json({
+      source: used,
+      shelves: shelves.map((shelf) => ({
+        id: shelf.id,
+        title: shelf.title,
+        subtitle: shelf.subtitle,
+        browse: shelf.browse ?? null,
+        titles: shelf.titles.map((t) => ({
+          id: t.libraryId,
+          source: used,
+          title: t.title,
+          altTitles: [],
+          originalLanguage: t.originalLang,
+          year: t.year,
+          status: t.status,
+          tags: t.tags.slice(0, 6),
+          coverUrl: `/api/cover/${encodeURIComponent(t.libraryId)}`,
+          isSaved: lib.getTitle(t.libraryId) != null,
+        })),
+      })),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[home] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
 apiRouter.get('/discover', async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q : undefined;
   const lang = typeof req.query.lang === 'string' && LANGS.includes(req.query.lang) ? req.query.lang : undefined;
+  const source = typeof req.query.source === 'string' ? req.query.source : undefined;
+  if (source && !hasProvider(source)) {
+    return res.status(400).json({ error: `unknown source: ${source}` });
+  }
   const page = Math.max(1, Number(req.query.page ?? 1) || 1);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 24) || 24));
-  const { titles, total } = await ingest.discover({ q, lang, limit, offset: (page - 1) * limit });
+  const tags = typeof req.query.tags === 'string' ? req.query.tags.split(',').filter(Boolean) : undefined;
+  const sort = typeof req.query.sort === 'string' ? (req.query.sort as never) : undefined;
+  const createdSince = typeof req.query.createdSince === 'string' ? req.query.createdSince : undefined;
+  let result: Awaited<ReturnType<typeof ingest.discover>>;
+  try {
+    result = await ingest.discover({
+      q,
+      lang,
+      limit,
+      offset: (page - 1) * limit,
+      source,
+      tags,
+      sort,
+      createdSince,
+    });
+  } catch (err) {
+    // Without this the default Express handler answers an HTML error page to a
+    // JSON endpoint, and the client reports a parse error instead of the cause.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[discover] FAILED: ${message}`);
+    return res.status(502).json({ error: message });
+  }
+  // Pages the client may actually ask for: bounded by the match count when the
+  // source reports one, and by the offset the source will accept. A pager built
+  // from MangaDex's raw total would offer 2400 pages, of which 334 work.
+  // The last usable page is the one whose offset still lands within the source's
+  // limit, so it is floor(maxOffset / limit) + 1 -- not ceil over the item count.
+  const byOffset = result.maxOffset == null ? Infinity : Math.floor(result.maxOffset / limit) + 1;
+  const byTotal = result.total == null ? Infinity : Math.ceil(result.total / limit);
+  const bound = Math.min(byOffset, byTotal);
+  const pages = Number.isFinite(bound) ? Math.max(1, bound) : 0;
+
   res.json({
-    total,
+    total: result.total,
     page,
     limit,
-    titles: titles.map((t) => ({
-      id: t.id,
-      title: ingest.mainTitle(t),
+    // 0 means "unknown": the client falls back to a next/previous pager.
+    pages,
+    hasMore: pages > 0 ? page < pages : result.titles.length >= limit,
+    source: result.source,
+    titles: result.titles.map((t) => ({
+      id: t.libraryId,
+      source: result.source,
+      title: t.title,
       altTitles: t.altTitles.slice(0, 5),
-      originalLanguage: t.originalLanguage,
+      originalLanguage: t.originalLang,
       year: t.year,
       status: t.status,
-      tags: t.tags.map((tg) => tg.name).slice(0, 6),
-      coverUrl: t.coverUrl,
-      isSaved: lib.getTitle(t.id) != null,
+      tags: t.tags.slice(0, 6),
+      // Point at our own cache rather than the upstream CDN.
+      coverUrl: `/api/cover/${encodeURIComponent(t.libraryId)}`,
+      isSaved: lib.getTitle(t.libraryId) != null,
     })),
   });
 });
@@ -74,13 +185,15 @@ apiRouter.get('/library/:id', async (req, res) => {
   // Title not in library yet: browse it from MangaDex without importing.
   if (!title) {
     try {
-      const remote = await ingest.remoteTitleDetail(id);
+      // `?refresh=1` skips the cache for this one read.
+      const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+      const remote = await ingest.remoteTitleDetail(id, { refresh });
       return res.json({
         inLibrary: false,
-        coverUrl: remote.coverUrl,
+        coverUrl: `/api/cover/${encodeURIComponent(id)}`,
         title: {
           id: remote.id,
-          provider: 'mangadex',
+          provider: remote.source,
           provider_id: remote.id,
           title: remote.title,
           alt_titles: remote.altTitles,
@@ -132,7 +245,7 @@ apiRouter.get('/library/:id', async (req, res) => {
   const progress = lib.getProgress(id);
   res.json({
     inLibrary: true,
-    coverUrl: title.cover_local ? `/api/library/${id}/cover` : null,
+    coverUrl: `/api/cover/${encodeURIComponent(id)}`,
     title: {
       id: title.id,
       provider: title.provider,
@@ -155,9 +268,12 @@ apiRouter.get('/library/:id', async (req, res) => {
 });
 
 apiRouter.post('/library/import', async (req, res) => {
-  const { mangadexId } = req.body ?? {};
+  // `mangadexId` predates multiple sources; `id` is the current spelling and
+  // carries a `provider:` prefix for anything that is not MangaDex.
+  const raw = req.body ?? {};
+  const mangadexId: unknown = raw.id ?? raw.mangadexId;
   if (!mangadexId || typeof mangadexId !== 'string') {
-    return res.status(400).json({ error: 'mangadexId required' });
+    return res.status(400).json({ error: 'id required' });
   }
   try {
     const result = await ingest.importTitle(mangadexId);
@@ -222,6 +338,9 @@ apiRouter.get('/library/:id/chapters/:chapterId', (req, res) => {
       title: ch.chapter_title,
       volume: ch.volume,
       language: ch.language,
+      // Human-readable name of the language actually printed on these pages;
+      // the reader uses it to label the translation controls.
+      languageLabel: langSpec(ch.language).label,
       pages: ch.pages,
       scanlator: ch.scanlator,
       publishedAt: ch.published_at,
@@ -235,17 +354,14 @@ apiRouter.get('/library/:id/chapters/:chapterId', (req, res) => {
 
 apiRouter.post('/library/:id/chapters/:chapterId/download', async (req, res) => {
   const { id, chapterId } = req.params;
-  if (!lib.getChapter(id, chapterId)) {
-    // Title not in library yet -> importing it also creates the chapter row.
-    if (!lib.getTitle(id)) {
-      try {
-        await ingest.importTitle(id);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[import ${id}] FAILED: ${message}`);
-        return res.status(502).json({ error: message });
-      }
-    }
+  try {
+    // Imports the title when needed and adds this exact chapter, which an
+    // import on its own may have filtered out in favour of another language.
+    await ingest.ensureChapter(id, chapterId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[import ${id}] FAILED: ${message}`);
+    return res.status(502).json({ error: message });
   }
   if (runningChapterDownloads.has(chapterId)) {
     return res.json({ started: false, message: 'already downloading' });
@@ -257,31 +373,148 @@ apiRouter.post('/library/:id/chapters/:chapterId/download', async (req, res) => 
   res.json({ started: true });
 });
 
-apiRouter.get('/library/:id/cover', (req, res) => {
-  const { id } = req.params;
-  const title = lib.getTitle(id);
-  if (!title?.cover_local || !fs.existsSync(title.cover_local)) {
-    return res.status(404).json({ error: 'no cover' });
+/**
+ * Covers for any title the app has seen, saved or not. The first request
+ * downloads and stores the image; later ones are served from disk, so browsing
+ * the same page twice costs the upstream CDN nothing.
+ */
+async function sendCover(id: string, res: Response): Promise<void> {
+  const file = await coverFile(id);
+  if (!file || !fs.existsSync(file)) {
+    res.status(404).json({ error: 'no cover' });
+    return;
   }
-  res.setHeader('Content-Type', contentType(title.cover_local));
-  res.sendFile(path.resolve(title.cover_local));
+  res.setHeader('Content-Type', contentType(file));
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.sendFile(path.resolve(file));
+}
+
+apiRouter.get('/cover/:id', async (req, res) => {
+  await sendCover(req.params.id, res);
+});
+
+// Kept because saved titles have linked to it since before the cover cache.
+apiRouter.get('/library/:id/cover', async (req, res) => {
+  await sendCover(req.params.id, res);
 });
 
 apiRouter.get('/library/data/:titleId/:chapterId/:pageNumber', (req, res) => {
   const { titleId, chapterId } = req.params;
   const pageNumber = Number(req.params.pageNumber);
-  const page = lib.listPages(chapterId).find((p) => p.page_number === pageNumber);
-  if (!page?.local_path || !fs.existsSync(page.local_path)) {
+  // Resolves through the file on disk, so a chapter whose rows lost their
+  // paths still serves instead of 404-ing with every image sitting right there.
+  const local = lib.pageFile(titleId, chapterId, pageNumber);
+  if (!local) {
     return res.status(404).json({ error: 'page not downloaded' });
   }
-  const filePath = path.resolve(page.local_path);
+  const filePath = path.resolve(local);
   res.setHeader('Content-Type', contentType(filePath));
   res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   res.sendFile(filePath);
 });
 
+/**
+ * The language to OCR a page as is the chapter's own language. Using the
+ * title's `original_lang` meant Japanese OCR ran on Georgian and English scans.
+ */
+function chapterSourceLang(titleId: string, chapterId: string): string {
+  const chapter = lib.getChapter(titleId, chapterId);
+  return chapter?.language || config.translate.defaultSource;
+}
+
+/**
+ * A chapter read straight from its source, with nothing saved. Mirrors the
+ * shape of the downloaded-chapter response so the reader renders both the same
+ * way; `preview: true` is what tells it the pages are not local.
+ */
+apiRouter.get('/preview/:titleId/:chapterId', async (req, res) => {
+  const { titleId, chapterId } = req.params;
+  try {
+    const [info, pages] = await Promise.all([
+      previewChapterInfo(titleId, chapterId),
+      previewPages(titleId, chapterId),
+    ]);
+    const encoded = `${encodeURIComponent(titleId)}/${encodeURIComponent(chapterId)}`;
+    res.json({
+      preview: true,
+      chapter: {
+        id: chapterId,
+        chapter: info?.chapter ?? null,
+        title: info?.title ?? null,
+        volume: info?.volume ?? null,
+        language: info?.language ?? '',
+        languageLabel: langSpec(info?.language).label,
+        pages: pages.length,
+        scanlator: info?.scanlator ?? null,
+        publishedAt: info?.publishedAt ?? null,
+        downloaded: 0,
+        downloadError: null,
+        downloading: false,
+      },
+      pages: pages.map((_, i) => ({
+        pageNumber: i + 1,
+        downloaded: 0,
+        url: `/api/preview/${encoded}/${i + 1}`,
+      })),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[preview ${chapterId}] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
+/** Streams one preview page through the provider, so its headers apply. */
+apiRouter.get('/preview/:titleId/:chapterId/:pageNumber', async (req, res) => {
+  const { titleId, chapterId } = req.params;
+  const pageNumber = Number(req.params.pageNumber);
+  try {
+    const pages = await previewPages(titleId, chapterId);
+    const image = pages[pageNumber - 1];
+    if (!image) return res.status(404).json({ error: 'page out of range' });
+
+    const upstream = await getProvider(decodeId(titleId).provider).fetchImage(image);
+    if (!upstream.ok || !upstream.body) {
+      return res.status(502).json({ error: `source returned HTTP ${upstream.status}` });
+    }
+    res.setHeader('Content-Type', upstream.headers.get('content-type') ?? 'image/jpeg');
+    // Only the browser caches these; nothing is written to the library.
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    res.send(buffer);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[preview ${chapterId} p${pageNumber}] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
+/** Readings the user has corrected, reused on every later page. */
+apiRouter.get('/corrections', (req, res) => {
+  const lang = typeof req.query.lang === 'string' ? req.query.lang : undefined;
+  res.json({ corrections: listCorrections(lang) });
+});
+
+apiRouter.post('/corrections', (req, res) => {
+  const { sourceLang, source, corrected } = req.body ?? {};
+  if (typeof sourceLang !== 'string' || typeof source !== 'string' || typeof corrected !== 'string') {
+    return res.status(400).json({ error: 'sourceLang, source and corrected are required' });
+  }
+  if (!corrected.trim()) {
+    deleteCorrection(sourceLang, source);
+    return res.json({ ok: true, removed: true });
+  }
+  saveCorrection(sourceLang, source, corrected);
+  res.json({ ok: true });
+});
+
 apiRouter.get('/translate/languages', (_req, res) => {
-  res.json({ targets: config.translate.targets, source: config.translate.ocrSource });
+  res.json({
+    targets: config.translate.targets,
+    defaultSource: config.translate.defaultSource,
+    llm: isLlmConfigured(),
+    chapterLanguages: config.translate.chapterLanguages,
+  });
 });
 
 // Poll a chapter-translation job. Register before the :pageNumber route so
@@ -307,6 +540,85 @@ apiRouter.post('/translate/:titleId/:chapterId', (req, res) => {
   res.json({ started: job.running, ...job });
 });
 
+/** Shared guard for the per-page translation routes. */
+function resolvePage(
+  req: { params: Record<string, string>; query: Record<string, unknown> },
+): { titleId: string; chapterId: string; pageNumber: number; target: string; localPath: string } | { error: string; status: number } {
+  const { titleId, chapterId } = req.params;
+  const pageNumber = Number(req.params.pageNumber);
+  const target = typeof req.query.target === 'string' ? req.query.target.toUpperCase() : 'EN';
+  if (!config.translate.targets.includes(target)) {
+    return { error: `unsupported target: ${target}`, status: 400 };
+  }
+  const localPath = imgtranslator.pageLocalPath(titleId, chapterId, pageNumber);
+  if (!localPath || !fs.existsSync(localPath)) {
+    return { error: 'page not downloaded', status: 404 };
+  }
+  return { titleId, chapterId, pageNumber, target, localPath };
+}
+
+// The page with the original lettering erased but nothing drawn on top. The
+// reader pairs it with the HTML text layer: an HTML box cannot follow the curve
+// of a speech balloon, but an already-erased balloon does not need one.
+apiRouter.get('/translate/:titleId/:chapterId/:pageNumber/clean', async (req, res) => {
+  const resolved = resolvePage(req as never);
+  if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+  try {
+    const result = await imgtranslator.renderPage(
+      {
+        titleId: resolved.titleId,
+        chapterId: resolved.chapterId,
+        pageNumber: resolved.pageNumber,
+        sourceLang: chapterSourceLang(resolved.titleId, resolved.chapterId),
+        targetLang: resolved.target,
+        localPath: resolved.localPath,
+      },
+      'clean',
+    );
+    res.setHeader('Content-Type', result.mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(result.buffer);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[clean p${resolved.pageNumber}] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
+// Text-layer description for a page: the reader draws it over the original
+// scan, which keeps the artwork pristine and the text selectable.
+apiRouter.get('/translate/:titleId/:chapterId/:pageNumber/overlay', async (req, res) => {
+  const { titleId, chapterId } = req.params;
+  const pageNumber = Number(req.params.pageNumber);
+  const target = typeof req.query.target === 'string' ? req.query.target.toUpperCase() : 'EN';
+  if (!config.translate.targets.includes(target)) {
+    return res.status(400).json({ error: `unsupported target: ${target}` });
+  }
+  const localPath = imgtranslator.pageLocalPath(titleId, chapterId, pageNumber);
+  if (!localPath || !fs.existsSync(localPath)) {
+    return res.status(404).json({ error: 'page not downloaded' });
+  }
+  try {
+    const overlay = await imgtranslator.pageOverlay(
+      {
+        titleId,
+        chapterId,
+        pageNumber,
+        sourceLang: chapterSourceLang(titleId, chapterId),
+        targetLang: target,
+        localPath,
+      },
+      { refresh: req.query.refresh === '1' },
+    );
+    res.setHeader('Cache-Control', 'no-cache');
+    res.json(overlay);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[overlay p${pageNumber}] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
 apiRouter.get('/translate/:titleId/:chapterId/:pageNumber', async (req, res) => {
   const { titleId, chapterId } = req.params;
   const pageNumber = Number(req.params.pageNumber);
@@ -318,8 +630,7 @@ apiRouter.get('/translate/:titleId/:chapterId/:pageNumber', async (req, res) => 
   if (!localPath || !fs.existsSync(localPath)) {
     return res.status(404).json({ error: 'page not downloaded' });
   }
-  const title = lib.getTitle(titleId);
-  const sourceLang = normalizeOcrSource(title?.original_lang).ocr;
+  const sourceLang = chapterSourceLang(titleId, chapterId);
   try {
     const result = await imgtranslator.translatePage({
       titleId,

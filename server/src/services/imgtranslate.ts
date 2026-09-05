@@ -1,20 +1,88 @@
+/**
+ * Page translation: OCR -> bubble grouping -> translation -> layout.
+ *
+ * The result of that pipeline is a `PageOverlay`: a description of every text
+ * block with its bubble geometry, the fitted font size and the wrapped lines.
+ * The reader can draw it as live HTML on top of the untouched scan, and the
+ * same structure is what bakes the flattened PNG — so both views always agree.
+ */
 import fs from 'node:fs';
 import path from 'node:path';
 import { createCanvas, loadImage, type SKRSContext2D } from '@napi-rs/canvas';
-import { createWorker } from 'tesseract.js';
-import { config, dataDir } from '../config';
+import { config } from '../config';
 import { chapterDir } from '../db';
-import { listPages } from './library';
-import { translateLines } from './translator';
-import { isMangaOcrAvailable, mangaOcrPage } from './mangaOcr';
+import { eraseInto, fitBubble, type Box, type BubbleFit, type PageRaster } from './bubble';
+import { fontStack } from './fonts';
+import {
+  hasImpossibleCharacters,
+  isSameLanguage,
+  langSpec,
+  targetScript,
+  wrapsAnywhere,
+  type Script,
+} from './lang';
+import { ocrPage, refineRegions, type RefineRegion } from './pageOcr';
+import { listPages, pageFile } from './library';
+import { groupIntoBlocks, type TextBlock } from './textBlocks';
+import { translateBlocks, type Provider } from './translator';
+import { applyCorrections } from './corrections';
 
-interface OcrLine {
-  text: string;
-  conf: number;
+/** Bump when the overlay shape changes so stale caches are regenerated. */
+const OVERLAY_VERSION = 12;
+
+export interface OverlayBlock {
+  id: number;
+  /** Box the source text occupied, in page pixels. */
   x0: number;
   y0: number;
   x1: number;
   y1: number;
+  /** Box the translation is laid out in — the bubble interior when detected. */
+  rx0: number;
+  ry0: number;
+  rx1: number;
+  ry1: number;
+  /** Recognized source text, kept so the reader can show the original. */
+  source: string;
+  /** Translated text. */
+  text: string;
+  /** Source ran in vertical columns (output is always horizontal). */
+  vertical: boolean;
+  /** Sits inside a uniform bubble we can repaint. */
+  inBubble: boolean;
+  /** Bubble colour, `rgb(r,g,b)`. */
+  fill: string;
+  /** Ink colour that reads against `fill`. */
+  color: string;
+  /** Font size in page pixels. */
+  fontSize: number;
+  lineHeight: number;
+  /** Server-side wrapping, used by the baked render. */
+  lines: string[];
+  /** Mean OCR confidence over the block's lines, 0-100. */
+  confidence: number;
+  /**
+   * The reading is not trustworthy: it carries a character that cannot be part
+   * of a word, or scored very low. The reader marks these instead of showing a
+   * confident translation of something it could not read.
+   */
+  uncertain: boolean;
+}
+
+export interface PageOverlay {
+  v: number;
+  width: number;
+  height: number;
+  /** MangaDex language code the page was OCR'd as. */
+  sourceLang: string;
+  sourceLabel: string;
+  targetLang: string;
+  engine: string;
+  provider: Provider;
+  translated: boolean;
+  /** Why nothing was translated, when `translated` is false. */
+  reason?: 'same-language' | 'no-text';
+  blocks: OverlayBlock[];
 }
 
 export interface TranslatedPage {
@@ -24,96 +92,76 @@ export interface TranslatedPage {
   translated: boolean;
 }
 
-// OCR result cache directory (persists across restarts).
-const ocrRoot = path.join(dataDir, '.ocr');
-fs.mkdirSync(ocrRoot, { recursive: true });
-
-let ocrSemaphore = Promise.resolve();
-
-/** Serialize OCR runs so traineddata downloads / worker spawns don't pile up. */
-function withOcrSlot<T>(fn: () => Promise<T>): Promise<T> {
-  const run = ocrSemaphore.then(fn, fn);
-  ocrSemaphore = run.then(() => undefined, () => undefined);
-  return run;
+export interface TranslateOptions {
+  titleId: string;
+  chapterId: string;
+  pageNumber: number;
+  /** MangaDex language code of the chapter (not of the title). */
+  sourceLang: string;
+  /** DeepL-style target code, e.g. `FR`. */
+  targetLang: string;
+  localPath: string;
 }
 
-async function ocrLines(filePath: string, sourceLang: string): Promise<OcrLine[]> {
-  const lang = config.translate.ocrSource || sourceLang;
-  // Manga-OCR (RapidOCR detection + manga-ocr recognition) is used for
-  // Japanese pages; tesseract is the fallback and covers other languages.
-  const useManga = lang === 'jpn' && isMangaOcrAvailable();
-  const engineTag = useManga ? '.mangaocr' : '';
-  const cacheKey = `${path.basename(filePath)}.${lang}${engineTag}.json`;
-  const cachePath = path.join(ocrRoot, cacheKey);
-  if (fs.existsSync(cachePath)) {
-    try {
-      return JSON.parse(fs.readFileSync(cachePath, 'utf8')) as OcrLine[];
-    } catch {
-      /* re-ocr below */
-    }
-  }
+// Scratch context used purely to measure text while fitting.
+const measureCanvas = createCanvas(8, 8);
+const measureCtx = measureCanvas.getContext('2d');
 
-  const lines = await withOcrSlot(async () => {
-    if (useManga) {
-      try {
-        const manga = await mangaOcrPage(filePath);
-        if (manga && manga.length > 0) {
-          return manga
-            .filter((l) => l.text.trim().length > 0)
-            .map((l) => ({ text: l.text, conf: Math.max(0, Math.min(100, l.conf * 100)), x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1 }));
-        }
-        console.warn(`[translate] manga-ocr returned no lines for ${path.basename(filePath)}; falling back to tesseract`);
-      } catch (err) {
-        console.error(`[translate] manga-ocr failed for ${path.basename(filePath)}: ${err instanceof Error ? err.message : err}`);
-      }
-    }
+function trlDir(titleId: string, chapterId: string): string {
+  const dir = path.join(chapterDir(titleId, chapterId), '.trl');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
-    // Tesseract fallback (also used for non-Japanese languages).
-    const worker = await createWorker(lang, 1, { cachePath: ocrRoot } as never);
-    try {
-      const { data } = await worker.recognize(filePath, {}, { text: true, blocks: true });
-      const out: OcrLine[] = [];
-      for (const block of data.blocks ?? []) {
-        for (const para of block.paragraphs ?? []) {
-          for (const line of para.lines ?? []) {
-            const text = (line.text ?? '').trim();
-            if (!text || (line.confidence ?? 0) < 35) continue;
-            const b = line.bbox ?? { x0: 0, y0: 0, x1: 0, y1: 0 };
-            out.push({ text, conf: line.confidence ?? 0, x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 });
-          }
-        }
-      }
-      return out;
-    } finally {
-      await worker.terminate();
-    }
-  });
+/**
+ * Cache names carry the pipeline version. Keeping it out of the filename let a
+ * stale render from an older pipeline keep being served next to a freshly
+ * regenerated overlay; files from a previous version are simply never read
+ * again, and `.trl/` can be deleted wholesale at any time.
+ */
+function overlayPath(o: TranslateOptions): string {
+  return path.join(
+    trlDir(o.titleId, o.chapterId),
+    `${o.pageNumber}.${o.targetLang}.v${OVERLAY_VERSION}.json`,
+  );
+}
 
+/** `baked` also draws the translation; `clean` only erases the original text. */
+export type RenderVariant = 'baked' | 'clean';
+
+function imagePath(o: TranslateOptions, variant: RenderVariant): string {
+  const suffix = variant === 'clean' ? '.clean' : '';
+  return path.join(
+    trlDir(o.titleId, o.chapterId),
+    `${o.pageNumber}.${o.targetLang}.v${OVERLAY_VERSION}${suffix}.png`,
+  );
+}
+
+function readOverlay(file: string): PageOverlay | null {
+  if (!fs.existsSync(file)) return null;
   try {
-    fs.writeFileSync(cachePath, JSON.stringify(lines));
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as PageOverlay;
+    return parsed.v === OVERLAY_VERSION ? parsed : null;
   } catch {
-    /* cache best-effort */
+    return null;
   }
-  return lines;
 }
 
-function isCjk(text: string): boolean {
-  return /[\u3000-\u9fff\uf900-\ufaff\uac00-\ud7af]/.test(text);
+function writeJson(file: string, value: unknown): void {
+  try {
+    fs.writeFileSync(file, JSON.stringify(value));
+  } catch {
+    /* cache is best-effort */
+  }
 }
 
-function wrapText(ctx: SKRSContext2D, text: string, maxWidth: number, vertical: boolean): string[] {
-  const chars = Array.from(text);
+/** Wraps `text` to `maxWidth` at the current font, per the target's script. */
+function wrapText(ctx: SKRSContext2D, text: string, maxWidth: number, script: Script): string[] {
   const lines: string[] = [];
-  if (vertical) {
-    for (const ch of chars) lines.push(ch);
-    return lines;
-  }
-  const hasSpaces = /\s/.test(text);
-  if (!hasSpaces && chars.length > 0 && isCjk(text)) {
-    // Break CJK by characters into lines that fit.
+  if (wrapsAnywhere(script)) {
     let line = '';
-    for (const ch of chars) {
-      if (ctx.measureText(line + ch).width > maxWidth && line) {
+    for (const ch of Array.from(text)) {
+      if (line && ctx.measureText(line + ch).width > maxWidth) {
         lines.push(line);
         line = ch;
       } else line += ch;
@@ -121,177 +169,474 @@ function wrapText(ctx: SKRSContext2D, text: string, maxWidth: number, vertical: 
     if (line) lines.push(line);
     return lines;
   }
-  const words = text.split(/\s+/);
-  let line = '';
-  for (const w of words) {
-    const candidate = line ? `${line} ${w}` : w;
-    if (ctx.measureText(candidate).width > maxWidth && line) {
-      lines.push(line);
-      line = w;
-    } else line = candidate;
+
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const candidate = lines.length > 0 ? `${lines[lines.length - 1]} ${word}` : word;
+    if (lines.length > 0 && ctx.measureText(candidate).width <= maxWidth) {
+      lines[lines.length - 1] = candidate;
+      continue;
+    }
+    // A single word longer than the box has to be broken mid-word.
+    if (ctx.measureText(word).width > maxWidth && word.length > 1) {
+      let piece = '';
+      for (const ch of word) {
+        if (piece && ctx.measureText(piece + ch).width > maxWidth) {
+          lines.push(piece);
+          piece = ch;
+        } else piece += ch;
+      }
+      if (piece) lines.push(piece);
+      continue;
+    }
+    lines.push(word);
   }
-  if (line) lines.push(line);
-  return lines;
+  return lines.length > 0 ? lines : [text];
 }
 
-/** Average color of pixels just outside a box (used to erase the old text). */
-function estimateBackground(ctx: SKRSContext2D, x0: number, y0: number, x1: number, y1: number): string {
-  const w = ctx.canvas.width;
-  const h = ctx.canvas.height;
-  const pad = 3;
-  const samples: [number, number][] = [];
-  const grab = (x: number, y: number) => {
-    if (x >= 0 && y >= 0 && x < w && y < h) {
-      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) samples.push([x + dx, y + dy]);
-    }
-  };
-  for (let x = x0 - pad; x <= x1 + pad; x++) {
-    grab(x, y0 - pad);
-    grab(x, y1 + pad);
-  }
-  for (let y = y0 - pad; y <= y1 + pad; y++) {
-    grab(x0 - pad, y);
-    grab(x1 + pad, y);
-  }
-  if (samples.length === 0) return 'rgb(255,255,255)';
-  const img = ctx.getImageData(0, 0, w, h);
-  const px = img.data;
-  let r = 0, g = 0, b = 0;
-  for (const [x, y] of samples) {
-    const i = (y * w + x) * 4;
-    r += px[i]; g += px[i + 1]; b += px[i + 2];
-  }
-  const n = samples.length;
-  return `rgb(${Math.round(r / n)},${Math.round(g / n)},${Math.round(b / n)})`;
+interface Layout {
+  fontSize: number;
+  lineHeight: number;
+  lines: string[];
 }
 
-function drawBox(ctx: SKRSContext2D, box: OcrLine, translated: string) {
-  const { x0, y0, x1, y1 } = box;
-  const bw = x1 - x0;
-  const bh = y1 - y0;
-  if (bw <= 0 || bh <= 0) return;
+/**
+ * Picks the largest font size at which the translation still fits the render
+ * box. Output is always horizontal, even for vertical Japanese sources: the old
+ * renderer drew translated Latin text one character per line.
+ */
+function layoutText(
+  text: string,
+  boxW: number,
+  boxH: number,
+  script: Script,
+  sourceLineHeight: number,
+): Layout {
+  const family = fontStack(script);
+  const maxWidth = Math.max(8, boxW * 0.92);
+  const maxHeight = Math.max(8, boxH * 0.94);
+  const lineFactor = 1.16;
 
-  const vertical = bw < bh * 0.75;
-  const padX = Math.max(2, Math.round(bw * 0.04));
-  const padY = Math.max(2, Math.round(bh * 0.04));
-  const fillX0 = x0 - padX;
-  const fillY0 = y0 - padY;
-  const fillX1 = x1 + padX;
-  const fillY1 = y1 + padY;
-  const fillW = fillX1 - fillX0;
-  const fillH = fillY1 - fillY0;
+  // Never letter much larger than the original did: when neighbouring bubbles
+  // merge into one fill region the layout box overshoots, and unbounded sizing
+  // then splashes a two-word line across the whole panel.
+  const sourceCap = Math.max(11, Math.round(sourceLineHeight * 1.5));
+  const upper = Math.round(Math.min(46, sourceCap, Math.max(11, maxHeight * 0.8)));
+  const words = wrapsAnywhere(script) ? [] : text.split(/\s+/).filter(Boolean);
+  let best: Layout = { fontSize: 9, lineHeight: 9 * lineFactor, lines: [text] };
 
-  const bg = estimateBackground(ctx, x0, y0, x1, y1);
-  ctx.fillStyle = bg;
-  ctx.fillRect(fillX0, fillY0, fillW, fillH);
-
-  const maxWidth = fillW - padX * 3;
-  const maxHeight = fillH - padY * 3;
-  let size = vertical ? Math.min(44, Math.max(14, Math.floor(fillH / 3))) : 28;
-  let lines: string[] = [];
-
-  for (;;) {
-    ctx.font = `bold ${size}px sans-serif`;
-    lines = wrapText(ctx, translated, maxWidth, vertical);
-    const totalH = lines.length * size * (vertical ? 1.15 : 1.05);
-    if ((totalH <= maxHeight || size <= 9) && lines.length > 0) break;
-    size -= 1;
+  for (let size = upper; size >= 9; size--) {
+    measureCtx.font = `bold ${size}px ${family}`;
+    const lines = wrapText(measureCtx, text, maxWidth, script);
+    const widest = lines.reduce((m, l) => Math.max(m, measureCtx.measureText(l).width), 0);
+    const height = lines.length * size * lineFactor;
+    best = { fontSize: size, lineHeight: size * lineFactor, lines };
+    if (height > maxHeight || widest > maxWidth) continue;
+    // Prefer a smaller font over hyphen-less mid-word breaks ("geschlosse n").
+    const longest = words.reduce((m, wd) => Math.max(m, measureCtx.measureText(wd).width), 0);
+    if (longest > maxWidth) continue;
+    break;
   }
-  if (lines.length === 0) return;
+  return best;
+}
 
-  ctx.fillStyle = '#000000';
-  ctx.textBaseline = 'middle';
-  ctx.font = `bold ${size}px sans-serif`;
-  ctx.textAlign = 'center';
 
-  const cx = fillX0 + fillW / 2;
-  const cy = fillY0 + fillH / 2;
-  if (vertical) {
-    // Draw glyphs top-to-bottom, columns right-to-left (manga convention).
-    const charsPerCol = Math.max(1, Math.floor(maxHeight / (size * 1.15)));
-    const cols: string[][] = [];
-    for (let i = 0; i < lines.length; i += charsPerCol) {
-      cols.push(lines.slice(i, i + charsPerCol));
+/** Letters and digits only, upper-cased, for comparing two readings. */
+function normalizeRead(text: string): string {
+  return text
+    .toUpperCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+/** Levenshtein distance, capped: only small distances matter to callers. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(
+        prev[j] + 1,
+        row[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
     }
-    const colWidth = size * 1.1;
-    const xStart = fillX1 - padX - colWidth;
-    cols.forEach((col, ci) => {
-      const colCx = xStart - ci * colWidth + size / 2;
-      col.forEach((ch, ri) => {
-        ctx.fillText(ch, colCx, fillY0 + padY + ri * size * 1.15);
-      });
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+/** True when `word` is just a misspelling of something already read. */
+function isVariantOf(word: string, known: string[]): boolean {
+  return known.some((k) => editDistance(word, k) <= Math.max(1, Math.floor(k.length / 4)));
+}
+
+/**
+ * Accepts a whole-bubble re-read only when it is the *same* text with a real
+ * word more of it.
+ *
+ * Two failure modes to exclude: a longer reading that shares nothing with the
+ * first pass is a misread of a bubble whose geometry was wrong, and a reading
+ * that only adds punctuation is the balloon outline being read as characters.
+ */
+function isBetterRead(oldText: string, newText: string): boolean {
+  const before = normalizeRead(oldText);
+  const after = normalizeRead(newText);
+  if (!after) return false;
+  const beforeLen = before.replace(/ /g, '').length;
+  const afterLen = after.replace(/ /g, '').length;
+  if (afterLen <= beforeLen) return false;
+  // A read several times longer has spilled outside the balloon.
+  if (beforeLen > 0 && afterLen > beforeLen * 3.5) return false;
+
+  const words = before.split(' ').filter((w) => w.length >= 3);
+  // A "gained" word that is one or two characters off a word already read is a
+  // corruption of it, not a recovered line ("LINFORSEEN" for "UNFORSEEN").
+  const gained = after
+    .split(' ')
+    .filter((w) => w.length >= 3 && !words.includes(w) && !isVariantOf(w, words));
+  // Nothing but stray marks was recovered.
+  if (gained.length === 0) return false;
+  if (words.length === 0) return true;
+  // Words the first pass read must survive almost intact. A re-read that adds
+  // one word while garbling two others is a different reading, not a better
+  // one, and swapping it in loses text that was already correct.
+  const kept = words.filter((w) => after.includes(w)).length;
+  return kept / words.length >= 0.85;
+}
+
+/**
+ * Re-reads each detected balloon as one block and adopts the result when it
+ * recovers text the per-line pass dropped.
+ */
+async function refineBlockText(
+  opts: TranslateOptions,
+  blocks: TextBlock[],
+  fits: Map<number, BubbleFit>,
+  sourceLang: string,
+): Promise<void> {
+  const regions: RefineRegion[] = [];
+  blocks.forEach((block, i) => {
+    const fit = fits.get(i);
+    if (!fit?.inBubble) return;
+    // Only balloons the recognized text does not account for are worth
+    // re-reading: that empty space is where a dropped line used to be. Re-doing
+    // a balloon that is already full trades one reading for another of equal
+    // quality, and sometimes loses a word that the first pass had right.
+    const blockArea = (block.x1 - block.x0) * (block.y1 - block.y0);
+    const fitArea = (fit.x1 - fit.x0) * (fit.y1 - fit.y0);
+    if (fitArea <= 0 || blockArea / fitArea > 0.8) return;
+    // Inset the crop: the layout box stops *at* the balloon outline, and
+    // feeding that outline to tesseract turns it into stray glyphs.
+    const insetX = Math.max(3, (fit.x1 - fit.x0) * 0.06);
+    const insetY = Math.max(3, (fit.y1 - fit.y0) * 0.06);
+    regions.push({
+      id: i,
+      x0: fit.x0 + insetX,
+      y0: fit.y0 + insetY,
+      x1: fit.x1 - insetX,
+      y1: fit.y1 - insetY,
     });
+  });
+  if (regions.length === 0) return;
+
+  const reread = await refineRegions(opts.localPath, regions, sourceLang);
+  for (const [id, text] of reread) {
+    if (isBetterRead(blocks[id].text, text)) blocks[id].text = text;
+  }
+}
+
+/** Runs the whole pipeline for one page. */
+async function analyze(
+  opts: TranslateOptions,
+  cached: PageOverlay | null,
+): Promise<{ overlay: PageOverlay; fits: Map<number, BubbleFit> }> {
+  const spec = langSpec(opts.sourceLang);
+  const script = targetScript(opts.targetLang);
+  const fits = new Map<number, BubbleFit>();
+
+  const img = await loadImage(opts.localPath);
+  const base: PageOverlay = {
+    v: OVERLAY_VERSION,
+    width: img.width,
+    height: img.height,
+    sourceLang: spec.code,
+    sourceLabel: spec.label,
+    targetLang: opts.targetLang,
+    engine: 'none',
+    provider: 'none',
+    translated: false,
+    blocks: [],
+  };
+
+  if (isSameLanguage(opts.sourceLang, opts.targetLang)) {
+    return { overlay: { ...base, reason: 'same-language' }, fits };
+  }
+
+  const ocr = await ocrPage({
+    titleId: opts.titleId,
+    chapterId: opts.chapterId,
+    pageNumber: opts.pageNumber,
+    localPath: opts.localPath,
+    sourceLang: spec.code,
+  });
+  base.engine = ocr.engine;
+
+  const blocks: TextBlock[] = groupIntoBlocks(ocr.lines, {
+    script: spec.script,
+    rtl: spec.rtl,
+    minConfidence: config.translate.minConfidence,
+    width: img.width,
+    height: img.height,
+  });
+  if (blocks.length === 0) {
+    return { overlay: { ...base, reason: 'no-text' }, fits };
+  }
+
+  // One raster grab for the page: the old code re-read the full image for every
+  // single box, which on a 35-box page copied ~200 MB of pixels.
+  const canvas = createCanvas(img.width, img.height);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const imageData = ctx.getImageData(0, 0, img.width, img.height);
+  const raster: PageRaster = {
+    data: imageData.data,
+    width: img.width,
+    height: img.height,
+  };
+  // Blocks are fitted one at a time, biggest first, and each one is fitted
+  // against the other blocks' lettering *and* the areas already claimed. Doing
+  // them independently let two neighbours grow into the same empty gap and end
+  // up overlapping, which is what pushed text outside its balloon.
+  const claimed: Box[] = [];
+  const byArea = blocks
+    .map((block, i) => ({ block, i }))
+    .sort(
+      (a, b) =>
+        (b.block.x1 - b.block.x0) * (b.block.y1 - b.block.y0) -
+        (a.block.x1 - a.block.x0) * (a.block.y1 - a.block.y0),
+    );
+  for (const { block, i } of byArea) {
+    const obstacles: Box[] = [...blocks.filter((_, j) => j !== i), ...claimed];
+    const fit = fitBubble(raster, block, obstacles);
+    fits.set(i, fit);
+    claimed.push({ x0: fit.x0, y0: fit.y0, x1: fit.x1, y1: fit.y1 });
+  }
+
+  if (config.translate.refine) await refineBlockText(opts, blocks, fits, spec.code);
+
+  // A reading the user has fixed by hand wins outright: it is the one piece of
+  // ground truth in the pipeline.
+  const corrected = applyCorrections(spec.code, blocks.map((b) => b.text));
+  corrected.forEach((text, i) => {
+    blocks[i].text = text;
+  });
+
+  // Reuse translations we already paid for when only the geometry changed.
+  const previous = new Map((cached?.blocks ?? []).map((b) => [b.source, b.text]));
+  const sources = blocks.map((b) => b.text);
+  const known = sources.map((s) => previous.get(s));
+  const missing = known.some((t) => t === undefined);
+
+  let texts: string[];
+  let provider: Provider;
+  if (missing) {
+    const result = await translateBlocks(sources, opts.targetLang, spec.code);
+    texts = result.texts;
+    provider = result.provider;
   } else {
-    const lineH = lines.length * size * 1.08;
-    let y = cy - lineH / 2 + size * 0.5;
-    for (const line of lines) {
-      ctx.fillText(line, cx, y);
-      y += size * 1.08;
-    }
+    texts = known as string[];
+    provider = cached?.provider ?? 'none';
+  }
+
+  const overlayBlocks: OverlayBlock[] = [];
+  blocks.forEach((block, i) => {
+    const text = (texts[i] ?? '').trim();
+    if (!text) return;
+    const fit = fits.get(i)!;
+    const sourceLineHeight = (block.y1 - block.y0) / Math.max(1, block.lines.length);
+    const layout = layoutText(text, fit.x1 - fit.x0, fit.y1 - fit.y0, script, sourceLineHeight);
+    overlayBlocks.push({
+      id: i,
+      x0: Math.round(block.x0),
+      y0: Math.round(block.y0),
+      x1: Math.round(block.x1),
+      y1: Math.round(block.y1),
+      rx0: Math.round(fit.x0),
+      ry0: Math.round(fit.y0),
+      rx1: Math.round(fit.x1),
+      ry1: Math.round(fit.y1),
+      source: block.text,
+      text,
+      vertical: block.vertical,
+      inBubble: fit.inBubble,
+      fill: fit.fill,
+      color: fit.textColor,
+      fontSize: layout.fontSize,
+      lineHeight: layout.lineHeight,
+      lines: layout.lines,
+      confidence: Math.round(block.conf),
+      uncertain:
+        hasImpossibleCharacters(block.text) || block.conf < config.translate.uncertainConfidence,
+    });
+  });
+
+  return {
+    overlay: {
+      ...base,
+      provider,
+      translated: overlayBlocks.length > 0,
+      reason: overlayBlocks.length > 0 ? undefined : 'no-text',
+      blocks: overlayBlocks,
+    },
+    fits,
+  };
+}
+
+/**
+ * Returns the overlay description for a page, running the pipeline on a miss.
+ * This is what the reader draws as live HTML over the original scan.
+ */
+export async function pageOverlay(
+  opts: TranslateOptions,
+  { refresh = false }: { refresh?: boolean } = {},
+): Promise<PageOverlay> {
+  const file = overlayPath(opts);
+  const cached = readOverlay(file);
+  // A correction has to be able to take effect without clearing the cache.
+  if (cached && !refresh) return cached;
+
+  const { overlay } = await analyze(opts, null);
+  writeJson(file, overlay);
+  return overlay;
+}
+
+/** `rgb(r,g,b)` -> `rgba(r,g,b,alpha)`. */
+function withAlpha(fill: string, alpha: number): string {
+  const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(fill);
+  return m ? `rgba(${m[1]},${m[2]},${m[3]},${alpha})` : fill;
+}
+
+function roundedRect(ctx: SKRSContext2D, x: number, y: number, w: number, h: number, r: number): void {
+  const radius = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+/** Draws one block onto the page canvas. */
+function drawBlock(ctx: SKRSContext2D, block: OverlayBlock, script: Script): void {
+  const total = block.lines.length * block.lineHeight;
+  const cx = (block.rx0 + block.rx1) / 2;
+  const cy = (block.ry0 + block.ry1) / 2;
+
+  // Blocks outside a bubble were never erased, so the original lettering is
+  // still underneath. A translucent plate hides it while leaving the artwork
+  // legible — an outline alone just double-printed the two texts.
+  if (!block.inBubble) {
+    const padX = block.fontSize * 0.35;
+    const padY = block.fontSize * 0.2;
+    const w = Math.max(block.rx1 - block.rx0, 8) + padX * 2;
+    const h = total + padY * 2;
+    ctx.save();
+    ctx.fillStyle = withAlpha(block.fill, 0.88);
+    roundedRect(ctx, cx - w / 2, cy - h / 2, w, h, block.fontSize * 0.35);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.font = `bold ${block.fontSize}px ${fontStack(script)}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = block.color;
+
+  let y = cy - total / 2 + block.lineHeight / 2;
+  for (const line of block.lines) {
+    ctx.fillText(line, cx, y);
+    y += block.lineHeight;
   }
 }
 
 /**
- * Translates the text found on a page image by OCR-ing the source language,
- * machine-translating the text, erasing the original glyphs and redrawing the
- * translation fitted back into each speech box. Results are cached on disk.
+ * Renders a page.
+ *
+ * `baked` erases the original lettering and paints the translation, giving a
+ * self-contained flattened image. `clean` stops after the erase, so the reader
+ * can lay live HTML text over it — a rectangular HTML box cannot follow the
+ * curve of a speech balloon, but an erased balloon needs no box at all.
+ *
+ * Both variants and the overlay JSON are cached under the chapter's `.trl/`.
  */
-export async function translatePage(opts: {
-  titleId: string;
-  chapterId: string;
-  pageNumber: number;
-  sourceLang: string;
-  targetLang: string;
-  localPath: string;
-}): Promise<TranslatedPage> {
-  const { titleId, chapterId, pageNumber, sourceLang, targetLang, localPath } = opts;
+export async function renderPage(
+  opts: TranslateOptions,
+  variant: RenderVariant = 'baked',
+): Promise<TranslatedPage> {
+  const out = imagePath(opts, variant);
+  if (fs.existsSync(out)) {
+    return { buffer: fs.readFileSync(out), mime: 'image/png', fromCache: true, translated: true };
+  }
+  const overlayFile = overlayPath(opts);
+  const cachedOverlay = readOverlay(overlayFile);
 
-  const trlDir = path.join(chapterDir(titleId, chapterId), '.trl');
-  fs.mkdirSync(trlDir, { recursive: true });
-  const outPath = path.join(trlDir, `${pageNumber}.${targetLang}.png`);
-  if (fs.existsSync(outPath)) {
-    return { buffer: fs.readFileSync(outPath), mime: 'image/png', fromCache: true, translated: true };
+  const ext = path.extname(opts.localPath).toLowerCase();
+  const sourceMime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+
+  const { overlay, fits } = await analyze(opts, cachedOverlay);
+  writeJson(overlayFile, overlay);
+
+  if (!overlay.translated) {
+    return {
+      buffer: fs.readFileSync(opts.localPath),
+      mime: sourceMime,
+      fromCache: false,
+      translated: false,
+    };
   }
 
-  const ext = path.extname(localPath).toLowerCase();
-  const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
-
-  const lines = await ocrLines(localPath, sourceLang);
-  if (lines.length === 0) {
-    return { buffer: fs.readFileSync(localPath), mime, fromCache: false, translated: false };
-  }
-
-  const sources = lines.map((l) => l.text);
-  const tr = await translateLines(sources, targetLang, sourceLang);
-  const targets = tr.lines;
-
-  const img = await loadImage(localPath);
+  const img = await loadImage(opts.localPath);
   const canvas = createCanvas(img.width, img.height);
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0);
 
-  const ordered = lines
-    .map((l, i) => ({ ...l, translated: targets[i] ?? l.text }))
-    .filter((l) => l.translated.trim() !== '')
-    .sort((a, b) => (b.y1 - b.y0) * (b.x1 - b.x0) - (a.y1 - a.y0) * (a.x1 - a.x0));
+  // Erase every bubble in one raster pass, then draw the new lettering.
+  const imageData = ctx.getImageData(0, 0, img.width, img.height);
+  const raster: PageRaster = { data: imageData.data, width: img.width, height: img.height };
+  let erased = false;
+  for (const block of overlay.blocks) {
+    const fit = fits.get(block.id);
+    if (fit?.inBubble) {
+      eraseInto(raster, fit);
+      erased = true;
+    }
+  }
+  if (erased) ctx.putImageData(imageData, 0, 0);
 
-  for (const box of ordered) {
-    drawBox(ctx, box, box.translated);
+  if (variant === 'baked') {
+    const script = targetScript(opts.targetLang);
+    for (const block of overlay.blocks) drawBlock(ctx, block, script);
   }
 
   const buffer = canvas.toBuffer('image/png');
   try {
-    fs.writeFileSync(outPath, buffer);
+    fs.writeFileSync(out, buffer);
   } catch {
-    /* cache best-effort */
+    /* cache is best-effort */
   }
   return { buffer, mime: 'image/png', fromCache: false, translated: true };
 }
 
+/** Flattened page with the translation drawn in. */
+export function translatePage(opts: TranslateOptions): Promise<TranslatedPage> {
+  return renderPage(opts, 'baked');
+}
+
 /** Look up a downloaded page's local path for a title/chapter. */
 export function pageLocalPath(titleId: string, chapterId: string, pageNumber: number): string | null {
-  return listPages(chapterId).find((p) => p.page_number === pageNumber)?.local_path ?? null;
+  return pageFile(titleId, chapterId, pageNumber);
 }
 
 export { listPages };
-export type { OcrLine };
