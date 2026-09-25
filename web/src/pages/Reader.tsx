@@ -56,6 +56,7 @@ export default function Reader() {
   const {
     states: overlays,
     request: requestOverlay,
+    cancel: cancelOverlay,
     refresh: refreshOverlay,
   } = usePageOverlays(id, chapterId, overlayActive ? translateLang : '');
 
@@ -242,6 +243,17 @@ export default function Reader() {
     return () => window.removeEventListener('keydown', onKey);
   }, [mode, ready, pages.length]);
 
+  // Page mode shows one page at a time: read the next two ahead once the page
+  // on screen is done, so turning the page is instant but the lookahead never
+  // delays the page being read.
+  const shownPage = mode === 'page' ? pages[pageIndex]?.pageNumber : undefined;
+  const shownStatus = shownPage != null ? overlays.get(shownPage)?.status : undefined;
+  useEffect(() => {
+    if (!overlayActive || shownPage == null) return;
+    if (shownStatus !== 'ready' && shownStatus !== 'error') return;
+    for (const ahead of pages.slice(pageIndex + 1, pageIndex + 3)) requestOverlay(ahead.pageNumber);
+  }, [overlayActive, shownPage, shownStatus, pageIndex, pages, requestOverlay]);
+
   const chapters = titleInfo?.chapters.items ?? [];
   const idx = chapters.findIndex((c) => c.id === chapterId);
   const prev = idx > 0 ? chapters[idx - 1] : null;
@@ -379,6 +391,7 @@ export default function Reader() {
               overlay={overlayActive ? overlays.get(p.pageNumber) ?? null : null}
               showOriginal={showOriginal}
               onRequestOverlay={overlayActive ? requestOverlay : undefined}
+              onCancelOverlay={overlayActive ? cancelOverlay : undefined}
               onCorrected={overlayActive ? onCorrected : undefined}
               imgRef={(el) => {
                 imgRefs.current[p.pageNumber - 1] = el;
@@ -401,6 +414,7 @@ export default function Reader() {
               overlay={overlayActive ? overlays.get(pages[pageIndex].pageNumber) ?? null : null}
               showOriginal={showOriginal}
               onRequestOverlay={overlayActive ? requestOverlay : undefined}
+              onCancelOverlay={overlayActive ? cancelOverlay : undefined}
               onCorrected={overlayActive ? onCorrected : undefined}
             />
             <div

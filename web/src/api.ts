@@ -140,11 +140,19 @@ export const api = {
     return request<TranslateLanguages>('/api/translate/languages');
   },
 
-  pageOverlay(titleId: string, chapterId: string, page: number, target: string, refresh = false) {
+  pageOverlay(
+    titleId: string,
+    chapterId: string,
+    page: number,
+    target: string,
+    refresh = false,
+    signal?: AbortSignal,
+  ) {
     const t = target.toUpperCase();
     const bust = refresh ? '&refresh=1' : '';
     return request<PageOverlay>(
       `/api/translate/${titleId}/${chapterId}/${page}/overlay?target=${t}${bust}`,
+      { signal },
     );
   },
 

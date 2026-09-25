@@ -51,6 +51,8 @@ interface Props {
   /** Temporarily hides the translation so the original lettering shows. */
   showOriginal: boolean;
   onRequestOverlay?: (pageNumber: number) => void;
+  /** Takes the page back out of the queue when it scrolls away before its turn. */
+  onCancelOverlay?: (pageNumber: number) => void;
   /** Re-reads this page after a correction is saved. */
   onCorrected?: (pageNumber: number) => void;
   imgRef?: (el: HTMLImageElement | null) => void;
@@ -70,18 +72,43 @@ export default function PageFrame({
   overlay,
   showOriginal,
   onRequestOverlay,
+  onCancelOverlay,
   onCorrected,
   imgRef,
 }: Props) {
   const [shownWidth, setShownWidth] = useState(0);
+  const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
   const img = useRef<HTMLImageElement | null>(null);
+  const frame = useRef<HTMLDivElement | null>(null);
 
+  // Ask for the text layer once the page is loaded and within a screen of the
+  // viewport, and give it back if it scrolls away before its turn. Every page
+  // used to ask on mount, so opening a chapter queued (and paid for) all of
+  // it, and resuming at page 40 waited behind pages 1-39. Waiting for the image
+  // matters: until then a frame has no height, so every page looks on screen.
   useEffect(() => {
-    if (onRequestOverlay) onRequestOverlay(pageNumber);
-  }, [onRequestOverlay, pageNumber]);
+    const el = frame.current;
+    if (!el || !loaded || !onRequestOverlay) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      onRequestOverlay(pageNumber);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) onRequestOverlay(pageNumber);
+        else onCancelOverlay?.(pageNumber);
+      },
+      { rootMargin: '100% 0px' },
+    );
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      onCancelOverlay?.(pageNumber);
+    };
+  }, [loaded, onRequestOverlay, onCancelOverlay, pageNumber]);
 
   // The overlay's font sizes are in page pixels, so they need the width the
   // image is actually drawn at — which changes with the window and the mode.
@@ -89,7 +116,11 @@ export default function PageFrame({
     (el: HTMLImageElement | null) => {
       img.current = el;
       imgRef?.(el);
-      if (el) setShownWidth(el.clientWidth);
+      if (el) {
+        setShownWidth(el.clientWidth);
+        // A cached image can finish loading before React sees the event.
+        if (el.complete && el.naturalWidth > 0) setLoaded(true);
+      }
     },
     [imgRef],
   );
@@ -110,13 +141,16 @@ export default function PageFrame({
   const showClean = Boolean(cleanSrc) && ready?.translated === true && !showOriginal;
 
   return (
-    <div className="page-frame">
+    <div className="page-frame" ref={frame}>
       <img
         ref={attach}
         src={showClean ? cleanSrc : src}
         alt={alt}
         loading={lazy ? 'lazy' : undefined}
-        onLoad={(e) => setShownWidth(e.currentTarget.clientWidth)}
+        onLoad={(e) => {
+          setShownWidth(e.currentTarget.clientWidth);
+          setLoaded(true);
+        }}
       />
 
       {overlay?.status === 'loading' && (

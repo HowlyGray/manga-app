@@ -81,6 +81,10 @@ clear the cache. Cache names carry a pipeline version; files from any other
 version are deleted when the server starts, and `.trl/` can be deleted at any
 time.
 
+The reader asks for a page's translation only once the page is within a screen
+of the viewport, and stops asking when you leave the chapter, so opening a
+chapter no longer translates all of it.
+
 ## Sources
 
 MangaDex is one provider behind a common interface rather than the only way in.
