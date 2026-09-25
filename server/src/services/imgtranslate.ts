@@ -32,7 +32,7 @@ import { applyCorrections } from './corrections';
  * Bump when the overlay shape changes so stale caches are regenerated. Files
  * written by any other version are deleted at startup (`sweepStaleTranslations`).
  */
-const OVERLAY_VERSION = 12;
+const OVERLAY_VERSION = 13;
 
 /**
  * Rendered pages are WebP: PNG made a translated page four to ten times the
@@ -55,6 +55,12 @@ export interface OverlayBlock {
   ry1: number;
   /** Recognized source text, kept so the reader can show the original. */
   source: string;
+  /**
+   * What OCR read before any stored correction was applied. Corrections are
+   * keyed by this: keying a second fix by `source` (already corrected) stored
+   * a rule the next OCR pass could never match, so re-editing did nothing.
+   */
+  reading: string;
   /** Translated text. */
   text: string;
   /** Source ran in vertical columns (output is always horizontal). */
@@ -445,27 +451,30 @@ async function analyze(
   if (config.translate.refine) await refineBlockText(opts, blocks, fits, spec.code);
 
   // A reading the user has fixed by hand wins outright: it is the one piece of
-  // ground truth in the pipeline.
-  const corrected = applyCorrections(spec.code, blocks.map((b) => b.text));
+  // ground truth in the pipeline. The raw readings are kept too, because a
+  // later correction of the same bubble has to be keyed by them.
+  const readings = blocks.map((b) => b.text);
+  const corrected = applyCorrections(spec.code, readings);
   corrected.forEach((text, i) => {
     blocks[i].text = text;
   });
 
-  // Reuse translations we already paid for when only the geometry changed.
+  // Reuse translations already paid for: after a geometry change, and after a
+  // correction, when only the corrected bubble reads differently. The rest keep
+  // their translation and go along as context for the ones translated again.
   const previous = new Map((cached?.blocks ?? []).map((b) => [b.source, b.text]));
   const sources = blocks.map((b) => b.text);
   const known = sources.map((s) => previous.get(s));
-  const missing = known.some((t) => t === undefined);
 
   let texts: string[];
   let provider: Provider;
-  if (missing) {
-    const result = await translateBlocks(sources, opts.targetLang, spec.code);
-    texts = result.texts;
-    provider = result.provider;
-  } else {
+  if (known.every((t) => t !== undefined)) {
     texts = known as string[];
     provider = cached?.provider ?? 'none';
+  } else {
+    const result = await translateBlocks(sources, opts.targetLang, spec.code, known);
+    texts = result.texts;
+    provider = result.provider !== 'none' ? result.provider : (cached?.provider ?? 'none');
   }
 
   const overlayBlocks: OverlayBlock[] = [];
@@ -486,6 +495,7 @@ async function analyze(
       rx1: Math.round(fit.x1),
       ry1: Math.round(fit.y1),
       source: block.text,
+      reading: readings[i],
       text,
       vertical: block.vertical,
       inBubble: fit.inBubble,
@@ -525,8 +535,12 @@ export async function pageOverlay(
   // A correction has to be able to take effect without clearing the cache.
   if (cached && !refresh) return cached;
 
-  const { overlay } = await analyze(opts, null);
+  // The cached overlay still goes in: passing nothing here re-translated every
+  // bubble of the page after a one-bubble correction.
+  const { overlay } = await analyze(opts, cached);
   writeJson(file, overlay);
+  // The flattened page still shows the old text; it is rebuilt on next request.
+  if (refresh) fs.rmSync(imagePath(opts, 'baked'), { force: true });
   return overlay;
 }
 
@@ -588,7 +602,8 @@ function drawBlock(ctx: SKRSContext2D, block: OverlayBlock, script: Script): voi
  * can lay live HTML text over it — a rectangular HTML box cannot follow the
  * curve of a speech balloon, but an erased balloon needs no box at all.
  *
- * Both variants and the overlay JSON are cached under the chapter's `.trl/`.
+ * Both variants and the overlay JSON are cached under the chapter's `.trl/`;
+ * a correction deletes the baked variant so it is redrawn with the fix.
  */
 export async function renderPage(
   opts: TranslateOptions,

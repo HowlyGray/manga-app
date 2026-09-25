@@ -53,11 +53,23 @@ export default function Reader() {
   const restored = useRef(false);
 
   const overlayActive = Boolean(translateLang) && textMode === 'overlay';
-  const { states: overlays, request: requestOverlay, refresh: refreshOverlay } = usePageOverlays(
-    id,
-    chapterId,
-    overlayActive ? translateLang : '',
-  );
+  const {
+    states: overlays,
+    request: requestOverlay,
+    refresh: refreshOverlay,
+  } = usePageOverlays(id, chapterId, overlayActive ? translateLang : '');
+
+  /**
+   * Bumped per page by each correction. The Image view's URL carries it, so the
+   * browser fetches the redrawn page instead of reusing the image it already
+   * holds for that URL.
+   */
+  const [revisions, setRevisions] = useState<Record<number, number>>({});
+
+  function onCorrected(pageNumber: number) {
+    setRevisions((r) => ({ ...r, [pageNumber]: (r[pageNumber] ?? 0) + 1 }));
+    refreshOverlay(pageNumber);
+  }
 
   useEffect(() => {
     api.translateLanguages().then(setLanguages, () => setLanguages(null));
@@ -145,7 +157,8 @@ export default function Reader() {
     // Overlay mode starts from the untouched scan; only the baked view asks the
     // server to flatten the translation into the image.
     if (translateLang && textMode === 'baked') {
-      return `/api/translate/${id}/${chapterId}/${p.pageNumber}?target=${translateLang}`;
+      const rev = revisions[p.pageNumber];
+      return `/api/translate/${id}/${chapterId}/${p.pageNumber}?target=${translateLang}${rev ? `&rev=${rev}` : ''}`;
     }
     return p.url;
   }
@@ -366,7 +379,7 @@ export default function Reader() {
               overlay={overlayActive ? overlays.get(p.pageNumber) ?? null : null}
               showOriginal={showOriginal}
               onRequestOverlay={overlayActive ? requestOverlay : undefined}
-              onCorrected={overlayActive ? refreshOverlay : undefined}
+              onCorrected={overlayActive ? onCorrected : undefined}
               imgRef={(el) => {
                 imgRefs.current[p.pageNumber - 1] = el;
               }}
@@ -388,7 +401,7 @@ export default function Reader() {
               overlay={overlayActive ? overlays.get(pages[pageIndex].pageNumber) ?? null : null}
               showOriginal={showOriginal}
               onRequestOverlay={overlayActive ? requestOverlay : undefined}
-              onCorrected={overlayActive ? refreshOverlay : undefined}
+              onCorrected={overlayActive ? onCorrected : undefined}
             />
             <div
               className="click-right"

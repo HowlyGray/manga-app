@@ -176,6 +176,8 @@ export interface OverlayBlock {
   ry1: number;
   /** Recognized source text, shown on hover. */
   source: string;
+  /** What OCR read before stored corrections; the key a new correction uses. */
+  reading?: string;
   text: string;
   vertical: boolean;
   inBubble: boolean;

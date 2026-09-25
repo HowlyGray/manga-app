@@ -28,7 +28,7 @@ image, per page or for an entire chapter at once.
 - **Two ways to read a translated page** — a live HTML text layer over the
   cleaned scan (selectable, sharp at any zoom, one click to see the original),
   or a flattened image you can export. Both come from the same layout, so they
-  always agree.
+  agree — including after a correction, which redraws the flattened page.
 - **Whole-chapter translation** — one click on the title page queues every page
   of a chapter; progress is reported live (the job tolerates server restarts
   because finished pages are cached on disk and skipped on re-run).
@@ -66,7 +66,9 @@ page → detect regions → recognize → group into bubbles → translate page
    new one appears, so a differently-garbled reading never replaces a good one.
    (Japanese pages skip this: `manga-ocr` is recognition-only.)
 6. **Translate** every bubble of the page in a single request, so the engine can
-   use the surrounding bubbles as context.
+   use the surrounding bubbles as context. When a page is re-run — after a
+   correction, say — bubbles whose reading did not change keep the translation
+   already paid for and are sent along as context only.
 7. **Erase and lay out.** A bubble is found by flood-filling the uniform region
    around the text and closing its interior holes, so only the balloon is
    repainted and the artwork survives; text sitting over artwork is never erased
@@ -143,6 +145,14 @@ read, and the correction is stored against that source language and applied to
 every later page — the same lettering misreads the same way throughout a
 series, so one fix keeps paying off. This is the only thing in the app that
 learns, and what it learns is your judgement, not a model's guess.
+
+A fix works at two levels. The whole bubble is remembered, so the same bubble
+read the same way again gets the whole fix. And a word that can only be a
+misread — it carries one of those impossible characters, or digits inside
+letters like `0K` — is learned on its own, so fixing "LÄ @IÚP" once also fixes
+`@IÚP` in every other bubble. Letters-only edits ("THEN" to "THEY") stay with
+their bubble, since a real rewording applied everywhere would do damage.
+Re-editing a bubble replaces what it taught; clearing the text removes both.
 
 Constraining tesseract to the language's alphabet was tried and rejected. It
 does remove the impossible characters, but by *deleting* them rather than

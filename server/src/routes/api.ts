@@ -10,7 +10,12 @@ import { langSpec } from '../services/lang';
 import { hasProvider, listProviders } from '../sources';
 import { coverFile } from '../services/sourceCache';
 import { previewChapterInfo, previewPages } from '../services/preview';
-import { deleteCorrection, listCorrections, saveCorrection } from '../services/corrections';
+import {
+  deleteCorrection,
+  listCorrections,
+  listWordCorrections,
+  saveCorrection,
+} from '../services/corrections';
 import { decodeId, getProvider, isLibraryId } from '../sources';
 import { downloadChapter } from '../downloader';
 import { getChapterTranslateStatus, startChapterTranslate } from '../services/chapterTranslate';
@@ -502,15 +507,27 @@ apiRouter.get('/preview/:titleId/:chapterId/:pageNumber', async (req, res) => {
   }
 });
 
-/** Readings the user has corrected, reused on every later page. */
+/**
+ * Readings the user has corrected, reused on every later page: whole bubbles,
+ * and the misread words learned from them.
+ */
 apiRouter.get('/corrections', (req, res) => {
   const lang = typeof req.query.lang === 'string' ? req.query.lang : undefined;
-  res.json({ corrections: listCorrections(lang) });
+  res.json({ corrections: listCorrections(lang), words: listWordCorrections(lang) });
 });
 
+/**
+ * Stores a correction. `source` is the raw OCR reading (the overlay block's
+ * `reading`), not text a previous correction already produced.
+ */
 apiRouter.post('/corrections', (req, res) => {
   const { sourceLang, source, corrected } = req.body ?? {};
-  if (typeof sourceLang !== 'string' || typeof source !== 'string' || typeof corrected !== 'string') {
+  if (
+    typeof sourceLang !== 'string' ||
+    !/^[a-z]{2,3}(-[a-z0-9]{2,8})?$/i.test(sourceLang) ||
+    typeof source !== 'string' ||
+    typeof corrected !== 'string'
+  ) {
     return res.status(400).json({ error: 'sourceLang, source and corrected are required' });
   }
   if (!corrected.trim()) {
@@ -656,7 +673,9 @@ apiRouter.get('/translate/:titleId/:chapterId/:pageNumber', async (req, res) => 
       localPath,
     });
     res.setHeader('Content-Type', result.mime);
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    // A correction redraws this image under the same URL, which `immutable`
+    // kept the browser from ever seeing. Revalidation is a cheap 304 otherwise.
+    res.setHeader('Cache-Control', 'no-cache');
     res.send(result.buffer);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

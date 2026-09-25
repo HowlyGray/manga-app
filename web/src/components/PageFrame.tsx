@@ -161,7 +161,9 @@ export default function PageFrame({
                     e.preventDefault();
                     setSaving(true);
                     try {
-                      await api.saveCorrection(ready.sourceLang, block.source, draft);
+                      // Keyed by the raw reading: `source` already has earlier
+                      // corrections applied, and no OCR pass produces that.
+                      await api.saveCorrection(ready.sourceLang, block.reading ?? block.source, draft);
                       setEditing(null);
                       onCorrected?.(pageNumber);
                     } finally {

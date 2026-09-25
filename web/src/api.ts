@@ -148,7 +148,10 @@ export const api = {
     );
   },
 
-  /** Teaches the app a reading, reused on every later page in that language. */
+  /**
+   * Teaches the app a reading, reused on every later page in that language.
+   * `source` is the raw OCR reading, not an already-corrected text.
+   */
   saveCorrection(sourceLang: string, source: string, corrected: string) {
     return request<{ ok: boolean; removed?: boolean }>('/api/corrections', {
       method: 'POST',

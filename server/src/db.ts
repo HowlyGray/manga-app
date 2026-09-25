@@ -123,6 +123,24 @@ CREATE TABLE IF NOT EXISTS corrections (
 );
 `;
 
+/**
+ * Word-level fixes learned from bubble corrections. A misread such as `@IÚP`
+ * for `GIÚP` recurs inside many different bubbles, which a whole-bubble match
+ * never reaches. `origin` is the bubble reading a rule was learned from, so
+ * removing that correction removes what it taught.
+ */
+const CORRECTION_WORDS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS correction_words (
+  source_lang TEXT NOT NULL,
+  source_word TEXT NOT NULL,
+  corrected_word TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  hits INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (source_lang, source_word)
+);
+`;
+
 function migrate(db: Database.Database): void {
   const version = db.pragma('user_version', { simple: true }) as number;
   if (version < 1) {
@@ -138,6 +156,10 @@ function migrate(db: Database.Database): void {
   if (version < 3) {
     db.exec(CORRECTION_SCHEMA);
     db.pragma('user_version = 3');
+  }
+  if (version < 4) {
+    db.exec(CORRECTION_WORDS_SCHEMA);
+    db.pragma('user_version = 4');
   }
 }
 

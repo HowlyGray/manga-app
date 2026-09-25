@@ -37,15 +37,19 @@ export function isLlmConfigured(): boolean {
 }
 
 /**
- * Translates every bubble of a page in a single request so the model can use
- * neighbouring bubbles as context. This is what fixes pronouns, sentence flow
- * and manga register — a per-bubble MT call cannot see any of that.
+ * Translates the bubbles listed in `need`, sending the whole page so the model
+ * can use neighbouring bubbles as context. This is what fixes pronouns,
+ * sentence flow and manga register — a per-bubble MT call cannot see any of
+ * that. Bubbles already translated (an earlier run of the page, or the memo)
+ * ride along with their translation, as context only.
  */
 async function claudeTranslate(
   texts: string[],
+  need: number[],
+  known: Map<number, string>,
   targetLang: string,
   sourceLabel: string,
-): Promise<string[] | null> {
+): Promise<Map<number, string> | null> {
   const { default: Anthropic } = await import('@anthropic-ai/sdk');
   const { zodOutputFormat } = await import('@anthropic-ai/sdk/helpers/zod');
   const { z } = await import('zod');
@@ -64,7 +68,15 @@ async function claudeTranslate(
     ),
   });
 
-  const numbered = texts.map((t, i) => `${i}\t${t}`).join('\n');
+  const wanted = new Set(need);
+  const numbered = texts
+    .map((t, i) => {
+      if (!t.trim()) return null;
+      const done = known.get(i);
+      return done !== undefined && !wanted.has(i) ? `${i}\t${t}\t${done}` : `${i}\t${t}`;
+    })
+    .filter((line): line is string => line !== null)
+    .join('\n');
   const targetName = langSpec(targetLang.toLowerCase()).label;
 
   const response = await client.messages.parse({
@@ -76,8 +88,10 @@ async function claudeTranslate(
     },
     system:
       'You translate comic and manga speech bubbles. You receive every text ' +
-      'block of one page, in reading order, as `id<TAB>text` lines. Return one ' +
-      'translation per input id, keeping the same ids.\n' +
+      'block of one page, in reading order, as `id<TAB>text` lines. A line with ' +
+      'a third field (`id<TAB>text<TAB>translation`) is already translated and ' +
+      'is context only. Return a translation for every other id, keeping the ' +
+      'same ids.\n' +
       '- The source text comes from OCR and may contain recognition errors; ' +
       'infer the intended wording from the surrounding blocks.\n' +
       '- Use the other blocks as context so pronouns, honorifics and register ' +
@@ -98,17 +112,14 @@ async function claudeTranslate(
   const parsed = response.parsed_output;
   if (!parsed) return null;
 
-  const out = [...texts];
-  let filled = 0;
+  const out = new Map<number, string>();
   for (const item of parsed.translations) {
-    if (!Number.isInteger(item.id) || item.id < 0 || item.id >= texts.length) continue;
+    if (!wanted.has(item.id)) continue;
     const text = item.text.trim();
-    if (!text) continue;
-    out[item.id] = text;
-    filled++;
+    if (text) out.set(item.id, text);
   }
   // A reply that covered almost nothing is more likely broken than correct.
-  if (filled < Math.ceil(texts.length / 2)) return null;
+  if (out.size < Math.ceil(need.length / 2)) return null;
   return out;
 }
 
@@ -232,24 +243,32 @@ function deeplToGoogleLang(target: string): string {
  * Translates whole text blocks (one speech bubble each), preserving order and
  * arity. Providers are tried best-first: Claude when a key is configured, then
  * DeepL, then the free Google endpoint.
+ *
+ * `previous[i]`, when set, is a translation already paid for -- typically from
+ * this page's last run, when only one bubble's reading changed -- and is kept
+ * rather than requested again.
  */
 export async function translateBlocks(
   texts: string[],
   targetLang: string,
   sourceLang: string,
+  previous: (string | undefined)[] = [],
 ): Promise<TranslationResult> {
   if (texts.length === 0) return { provider: 'none', texts: [] };
   if (isSameLanguage(sourceLang, targetLang)) return { provider: 'none', texts: [...texts] };
 
   const output = [...texts];
+  const known = new Map<number, string>();
   const pending: string[] = [];
   const pendingIdx: number[] = [];
   texts.forEach((text, i) => {
     const trimmed = text.trim();
     if (!trimmed) return;
-    const hit = memo.get(memoKey(targetLang, trimmed));
-    if (hit !== undefined) output[i] = hit;
-    else {
+    const hit = previous[i] ?? memo.get(memoKey(targetLang, trimmed));
+    if (hit !== undefined) {
+      output[i] = hit;
+      known.set(i, hit);
+    } else {
       pending.push(trimmed);
       pendingIdx.push(i);
     }
@@ -262,9 +281,13 @@ export async function translateBlocks(
 
   if (isLlmConfigured()) {
     try {
-      results = await claudeTranslate(pending, targetLang, spec.label);
-      if (results) provider = 'claude';
-      else console.warn('[translate] Claude returned an unusable reply; falling back');
+      const byId = await claudeTranslate(texts, pendingIdx, known, targetLang, spec.label);
+      // An id the reply skipped stays untranslated (empty) rather than being
+      // memoized as its own source text.
+      if (byId) {
+        results = pendingIdx.map((i) => byId.get(i) ?? '');
+        provider = 'claude';
+      } else console.warn('[translate] Claude returned an unusable reply; falling back');
     } catch (err) {
       console.error(
         `[translate] Claude failed: ${err instanceof Error ? err.message : err}; falling back`,
