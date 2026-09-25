@@ -9,11 +9,13 @@
   ],
   "scripts": {
     "dev": "concurrently -k -n server,web -c blue,magenta \"npm run dev -w server\" \"npm run dev -w web\"",
+    "dev:lan": "concurrently -k -n server,web -c blue,magenta \"npm run dev:lan -w server\" \"npm run dev:lan -w web\"",
     "dev:server": "npm run dev -w server",
     "dev:web": "npm run dev -w web",
     "sync": "npm run sync -w server",
     "build": "npm run build -w web",
     "serve": "npm run build && npm start -w server",
+    "serve:lan": "npm run build && npm run start:lan -w server",
     "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
   },
   "devDependencies": {

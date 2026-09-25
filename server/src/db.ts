@@ -166,9 +166,12 @@ export interface ChapterRow {
  * Makes a library id safe to use as a path segment. Ids from sources other than
  * MangaDex carry a `provider:` prefix, and a colon is not a legal filename
  * character on Windows. MangaDex UUIDs pass through unchanged.
+ *
+ * Leading dots are replaced as well: `..` survived the character filter, so a
+ * request naming `..` as its title and chapter resolved to the app root.
  */
 export function pathSegment(id: string): string {
-  return id.replace(/[^\w.-]+/g, '_');
+  return id.replace(/[^\w.-]+/g, '_').replace(/^\.+/, (dots) => '_'.repeat(dots.length));
 }
 
 /** Resolve the data subdirectory that holds a chapter's downloaded pages. */

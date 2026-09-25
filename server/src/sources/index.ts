@@ -61,3 +61,16 @@ export function decodeId(id: string): SourceRef {
   }
   return { provider: DEFAULT_SOURCE, providerId: id };
 }
+
+/** A bare MangaDex UUID, or `provider:` followed by a provider-local id. */
+const LIBRARY_ID =
+  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z][a-z0-9_-]*:[A-Za-z0-9][\w.-]*)$/i;
+
+/**
+ * Shape check for an id that arrives in a URL or request body. Ids end up as
+ * directory names, so anything that could climb out of the library is refused
+ * at the door instead of being left to later sanitizing.
+ */
+export function isLibraryId(id: unknown): id is string {
+  return typeof id === 'string' && id.length <= 200 && LIBRARY_ID.test(id);
+}

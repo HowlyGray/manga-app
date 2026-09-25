@@ -1,15 +1,17 @@
 import express from 'express';
-import cors from 'cors';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { guardApi } from './access';
 import { config } from './config';
 import { getDb } from './db';
 import { apiRouter } from './routes/api';
 
 const app = express();
 
-app.use(cors());
+// No CORS: the UI is same-origin, so cross-origin access only ever served other
+// sites. The guard also refuses requests that other sites trigger.
+app.use('/api', guardApi);
 app.use(express.json({ limit: '1mb' }));
 app.use('/api', apiRouter);
 
@@ -44,6 +46,8 @@ app.listen(config.port, config.host, () => {
     for (const address of lanAddresses()) {
       console.log(`  on this network:  http://${address}:${config.port}`);
     }
+  } else {
+    console.log('  this machine only; the :lan scripts open it to other devices');
   }
   console.log(`  library: ${config.libraryDir}`);
   console.log(`  db:      ${config.dataDir}`);

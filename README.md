@@ -273,10 +273,11 @@ Open http://localhost:5180.
 
 ## Reading on your phone or tablet
 
-Build once and serve everything from the API port:
+By default the app only listens on this machine. Build once and serve
+everything from the API port, opened to your network:
 
 ```bash
-npm run serve
+npm run serve:lan
 ```
 
 The console prints the address to open on the other device:
@@ -286,9 +287,12 @@ Manga app server listening on http://localhost:5180
   on this network:  http://192.168.1.42:5180
 ```
 
-`npm run dev` exposes the Vite server on the network the same way, on port 5173.
-Both bind every interface by default; set `HOST=127.0.0.1` to keep the app on
-this machine only.
+`npm run dev:lan` does the same for the development setup, on port 5173. Setting
+`HOST=0.0.0.0` has the same effect as the `:lan` scripts.
+
+Requests are only accepted for hostnames that point at this machine (its name,
+its addresses, `localhost`). If you reach it through some other name — a router
+DNS entry, a tunnel — add that name to `ALLOWED_HOSTS`.
 
 **On Windows the firewall blocks this until you allow the port.** Inbound
 connections are denied by default and no rule exists for Node, so the phone will
@@ -306,10 +310,13 @@ app to strangers. To undo it later:
 Remove-NetFirewallRule -DisplayName "Manga app"
 ```
 
-**The app has no authentication.** Anyone on the same network who opens the
-address gets full access — including the ability to download and delete-by-
-overwrite through the API. That is fine for a home network and not fine for a
-shared or public one.
+**The app has no authentication.** Once opened to the network, anyone on it who
+opens the address gets full access — including the ability to download and
+delete-by-overwrite through the API. That is fine for a home network and not
+fine for a shared or public one. Other *websites* are kept out either way: the
+API sends no CORS headers and refuses requests a browser marks as coming from
+another site, so a page you visit cannot read your library or start
+translations that spend your API credit.
 
 ## CLI sync tool
 
@@ -328,7 +335,8 @@ npm run sync -w server -- <command> [options]
 | Variable                | Default      | Description                                                    |
 | ----------------------- | ------------ | -------------------------------------------------------------- |
 | `PORT`                  | `5180`       | HTTP port for the server                                       |
-| `HOST`                  | `0.0.0.0`    | Bind address; `127.0.0.1` keeps the app off the network        |
+| `HOST`                  | `127.0.0.1`  | Bind address; `0.0.0.0` (or the `:lan` scripts) opens it to the network |
+| `ALLOWED_HOSTS`         | –            | Extra hostnames to accept, comma-separated (e.g. `mypc.lan`)   |
 | `DATA_DIR`              | `./data`     | SQLite database location (`library.db`)                        |
 | `LIBRARY_DIR`           | `./library`  | Downloaded pages and covers                                    |
 | `MDX_API_MS`            | `260`        | MangaDex API request interval (ms)                             |

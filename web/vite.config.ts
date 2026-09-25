@@ -4,16 +4,17 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   server: {
-    // Expose the dev server on the LAN too, so the same URL works from a phone.
-    // The /api proxy runs server-side, so it still targets localhost.
-    host: true,
+    // This machine only by default, like the API server: the proxy below would
+    // otherwise hand the unauthenticated API to the whole network. `npm run
+    // dev:lan` passes --host to open it to phones and tablets.
     port: 5173,
     proxy: {
-      '/api': `http://localhost:${process.env.PORT ?? 5180}`,
+      // 127.0.0.1 rather than localhost: the API binds IPv4 loopback, and
+      // `localhost` can resolve to ::1 first.
+      '/api': `http://127.0.0.1:${process.env.PORT ?? 5180}`,
     },
   },
   preview: {
-    host: true,
     port: 4173,
   },
 });

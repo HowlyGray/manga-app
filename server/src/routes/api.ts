@@ -11,11 +11,24 @@ import { hasProvider, listProviders } from '../sources';
 import { coverFile } from '../services/sourceCache';
 import { previewChapterInfo, previewPages } from '../services/preview';
 import { deleteCorrection, listCorrections, saveCorrection } from '../services/corrections';
-import { decodeId, getProvider } from '../sources';
+import { decodeId, getProvider, isLibraryId } from '../sources';
 import { downloadChapter } from '../downloader';
 import { getChapterTranslateStatus, startChapterTranslate } from '../services/chapterTranslate';
 
 export const apiRouter = Router();
+
+// Ids become directory names further down, so a malformed one is refused here
+// rather than trusted to later sanitizing.
+for (const name of ['id', 'titleId', 'chapterId']) {
+  apiRouter.param(name, (_req, res, next, value: string) => {
+    if (isLibraryId(value)) return next();
+    res.status(400).json({ error: `invalid ${name}` });
+  });
+}
+apiRouter.param('pageNumber', (_req, res, next, value: string) => {
+  if (/^[1-9]\d{0,4}$/.test(value)) return next();
+  res.status(400).json({ error: 'invalid page number' });
+});
 
 const runningTitleDownloads = new Set<string>();
 const runningChapterDownloads = new Set<string>();
@@ -272,8 +285,8 @@ apiRouter.post('/library/import', async (req, res) => {
   // carries a `provider:` prefix for anything that is not MangaDex.
   const raw = req.body ?? {};
   const mangadexId: unknown = raw.id ?? raw.mangadexId;
-  if (!mangadexId || typeof mangadexId !== 'string') {
-    return res.status(400).json({ error: 'id required' });
+  if (!isLibraryId(mangadexId)) {
+    return res.status(400).json({ error: 'a valid id is required' });
   }
   try {
     const result = await ingest.importTitle(mangadexId);
@@ -658,7 +671,9 @@ apiRouter.get('/progress/:titleId', (req, res) => {
 
 apiRouter.post('/progress', (req, res) => {
   const { titleId, chapterId, page = 0, mode = 'scroll' } = req.body ?? {};
-  if (!titleId || !chapterId) return res.status(400).json({ error: 'titleId and chapterId required' });
+  if (!isLibraryId(titleId) || !isLibraryId(chapterId)) {
+    return res.status(400).json({ error: 'titleId and chapterId required' });
+  }
   if (!lib.getChapter(titleId, chapterId)) return res.status(404).json({ error: 'chapter not found' });
   lib.setProgress(titleId, chapterId, Number(page ?? 0), mode === 'page' ? 'page' : 'scroll');
   res.json({ ok: true });
