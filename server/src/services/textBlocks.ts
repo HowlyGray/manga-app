@@ -67,15 +67,29 @@ function cleanText(text: string): string {
     .trim();
 }
 
+/** Kana that lengthen or clip a sound but never make a bubble on their own. */
+const NOT_STANDALONE = /[ーっッゝゞ々]/u;
+
 /**
  * Rejects the debris a permissive detector leaves behind: lone punctuation,
  * single stray glyphs, and short runs that are mostly symbols (`ძ.`, `(I"`).
  * Sending those to a translator wastes a call and paints noise on the page.
+ *
+ * The bar depends on the script. A three-character minimum dropped うん, 嘘 and
+ * 何!? -- ordinary one-glyph reactions in Japanese and Korean -- so they were
+ * neither translated nor erased. Elsewhere two letters ("OK", "NO") is enough,
+ * while a single letter is almost always a stray mark.
  */
-function isWorthTranslating(text: string): boolean {
-  if (text.length < 3 || !hasMeaning(text)) return false;
-  const letters = (text.match(/[\p{L}\p{N}]/gu) ?? []).length;
-  return text.length >= 6 || letters / text.length >= 0.5;
+function isWorthTranslating(text: string, script: Script): boolean {
+  if (!hasMeaning(text)) return false;
+  const glyphs = Array.from(text);
+  const letters = glyphs.filter((ch) => /[\p{L}\p{N}]/u.test(ch));
+  if (script === 'jpn' || script === 'cjk') {
+    if (!letters.some((ch) => !NOT_STANDALONE.test(ch))) return false;
+    return glyphs.length <= 4 || letters.length / glyphs.length >= 0.34;
+  }
+  if (letters.length < 2) return false;
+  return glyphs.length >= 6 || letters.length / glyphs.length >= 0.5;
 }
 
 export interface GroupOptions {
@@ -242,7 +256,7 @@ export function groupIntoBlocks(lines: OcrLine[], opts: GroupOptions): TextBlock
 
     const ordered = readingOrder(cluster, vertical, opts.rtl === true);
     const text = joinLines(ordered, opts.script);
-    if (!isWorthTranslating(text)) continue;
+    if (!isWorthTranslating(text, opts.script)) continue;
 
     blocks.push({
       x0: Math.min(...cluster.map((l) => l.x0)),
