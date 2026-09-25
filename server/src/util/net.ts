@@ -3,14 +3,27 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Serializes async work with a minimum interval between executions.
- * Used to stay well under remote API rate limits.
+ * Spaces out calls to a remote service.
+ *
+ * `run` serializes: the next call starts only after the previous one finished
+ * *and* the interval passed, so a retry backing off on a 429 holds everyone
+ * else back too. That suits rate-limited APIs. `acquire` only spaces out start
+ * times, for work that is meant to overlap, like parallel image downloads.
  */
 export class RateLimiter {
   private last = 0;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly minIntervalMs: number) {}
+
+  /**
+   * Resolves at the next free start slot without holding the queue while the
+   * caller's work runs. Wrapping a download in `run` instead serialized every
+   * download, which silently reduced MDX_IMAGE_CONCURRENCY to 1.
+   */
+  acquire(): Promise<void> {
+    return this.run(async () => {});
+  }
 
   run<T>(fn: () => Promise<T>): Promise<T> {
     const result = this.queue.then(async () => {

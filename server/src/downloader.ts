@@ -69,14 +69,14 @@ export async function downloadChapter(
     const ext = path.extname(names[index]) || '.jpg';
     const localPath = path.join(dir, `${String(pageNumber).padStart(4, '0')}${ext}`);
     try {
-      await imageLimiter.run(async () => {
-        const res = await provider.fetchImage(image);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const buf = Buffer.from(await res.arrayBuffer());
-        fs.writeFileSync(localPath, buf);
-        const sizeHeader = Number(res.headers.get('content-length') ?? NaN);
-        markPageDownloaded(chapterId, pageNumber, localPath, Number.isFinite(sizeHeader) ? sizeHeader : buf.length);
-      });
+      // Only the start is rate-limited; the downloads themselves overlap.
+      await imageLimiter.acquire();
+      const res = await provider.fetchImage(image);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      fs.writeFileSync(localPath, buf);
+      const sizeHeader = Number(res.headers.get('content-length') ?? NaN);
+      markPageDownloaded(chapterId, pageNumber, localPath, Number.isFinite(sizeHeader) ? sizeHeader : buf.length);
       downloaded++;
     } catch (err) {
       failed++;
