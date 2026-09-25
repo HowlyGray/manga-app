@@ -589,7 +589,9 @@ apiRouter.get('/translate/:titleId/:chapterId/:pageNumber/clean', async (req, re
       'clean',
     );
     res.setHeader('Content-Type', result.mime);
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    // Not `immutable`: the same URL serves a new render after a pipeline
+    // upgrade. The browser revalidates with the ETag and gets a 304 until then.
+    res.setHeader('Cache-Control', 'no-cache');
     res.send(result.buffer);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

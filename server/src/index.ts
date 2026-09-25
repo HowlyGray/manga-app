@@ -6,6 +6,7 @@ import { guardApi } from './access';
 import { config } from './config';
 import { getDb } from './db';
 import { apiRouter } from './routes/api';
+import { sweepStaleTranslations } from './services/imgtranslate';
 
 const app = express();
 
@@ -51,4 +52,15 @@ app.listen(config.port, config.host, () => {
   }
   console.log(`  library: ${config.libraryDir}`);
   console.log(`  db:      ${config.dataDir}`);
+
+  // Superseded translation renders are never read again. Reclaim the space in
+  // the background so a large library does not hold up startup.
+  sweepStaleTranslations().then(
+    ({ files, bytes }) => {
+      if (files > 0) {
+        console.log(`[cache] removed ${files} stale translation files (${Math.round(bytes / 1048576)} MB)`);
+      }
+    },
+    (err: unknown) => console.warn(`[cache] sweep failed: ${err instanceof Error ? err.message : err}`),
+  );
 });

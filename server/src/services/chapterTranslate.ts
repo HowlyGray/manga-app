@@ -1,9 +1,6 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { config } from '../config';
-import { chapterDir } from '../db';
 import { getChapter, listPages } from './library';
-import { translatePage } from './imgtranslate';
+import { isRendered, translatePage } from './imgtranslate';
 
 export interface ChapterTranslateJob {
   key: string;
@@ -72,9 +69,11 @@ async function runJob(
 ): Promise<void> {
   for (const page of pages) {
     // A page already translated+redrawn for this target short-circuits in
-    // translatePage(); count it as done without re-doing OCR.
-    const trlPath = path.join(jobKeyDir(job), `${page.pageNumber}.${job.target}.png`);
-    if (fs.existsSync(trlPath)) {
+    // translatePage(); count it as done without re-doing OCR. This used to test
+    // the first pipeline's `N.EN.png` name, so a chapter holding those old
+    // files was reported done without ever being translated again.
+    const key = { titleId: job.titleId, chapterId: job.chapterId, pageNumber: page.pageNumber, targetLang: job.target };
+    if (isRendered(key)) {
       job.pages.find((p) => p.pageNumber === page.pageNumber)!.status = 'ok';
       job.done += 1;
       continue;
@@ -99,10 +98,6 @@ async function runJob(
     await new Promise((r) => setTimeout(r, 0));
   }
   job.running = false;
-}
-
-function jobKeyDir(job: ChapterTranslateJob): string {
-  return path.join(chapterDir(job.titleId, job.chapterId), '.trl');
 }
 
 export function getChapterTranslateStatus(titleId: string, chapterId: string, targetLang: string): ChapterTranslateJob | null {

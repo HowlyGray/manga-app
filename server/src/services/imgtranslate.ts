@@ -4,12 +4,13 @@
  * The result of that pipeline is a `PageOverlay`: a description of every text
  * block with its bubble geometry, the fitted font size and the wrapped lines.
  * The reader can draw it as live HTML on top of the untouched scan, and the
- * same structure is what bakes the flattened PNG — so both views always agree.
+ * same structure is what bakes the flattened image — so both views agree.
  */
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { createCanvas, loadImage, type SKRSContext2D } from '@napi-rs/canvas';
-import { config } from '../config';
+import { config, dataDir } from '../config';
 import { chapterDir } from '../db';
 import { eraseInto, fitBubble, type Box, type BubbleFit, type PageRaster } from './bubble';
 import { fontStack } from './fonts';
@@ -27,8 +28,18 @@ import { groupIntoBlocks, type TextBlock } from './textBlocks';
 import { translateBlocks, type Provider } from './translator';
 import { applyCorrections } from './corrections';
 
-/** Bump when the overlay shape changes so stale caches are regenerated. */
+/**
+ * Bump when the overlay shape changes so stale caches are regenerated. Files
+ * written by any other version are deleted at startup (`sweepStaleTranslations`).
+ */
 const OVERLAY_VERSION = 12;
+
+/**
+ * Rendered pages are WebP: PNG made a translated page four to ten times the
+ * size of the scan it came from. Quality 90 keeps screentone and lettering
+ * clean.
+ */
+const IMAGE_QUALITY = 90;
 
 export interface OverlayBlock {
   id: number;
@@ -113,13 +124,16 @@ function trlDir(titleId: string, chapterId: string): string {
   return dir;
 }
 
+/** Identifies one page in one target language. */
+export type PageKey = Pick<TranslateOptions, 'titleId' | 'chapterId' | 'pageNumber' | 'targetLang'>;
+
 /**
  * Cache names carry the pipeline version. Keeping it out of the filename let a
  * stale render from an older pipeline keep being served next to a freshly
- * regenerated overlay; files from a previous version are simply never read
- * again, and `.trl/` can be deleted wholesale at any time.
+ * regenerated overlay. Files from other versions are never read again and are
+ * swept at startup; `.trl/` can also be deleted wholesale at any time.
  */
-function overlayPath(o: TranslateOptions): string {
+function overlayPath(o: PageKey): string {
   return path.join(
     trlDir(o.titleId, o.chapterId),
     `${o.pageNumber}.${o.targetLang}.v${OVERLAY_VERSION}.json`,
@@ -129,12 +143,17 @@ function overlayPath(o: TranslateOptions): string {
 /** `baked` also draws the translation; `clean` only erases the original text. */
 export type RenderVariant = 'baked' | 'clean';
 
-function imagePath(o: TranslateOptions, variant: RenderVariant): string {
+function imagePath(o: PageKey, variant: RenderVariant): string {
   const suffix = variant === 'clean' ? '.clean' : '';
   return path.join(
     trlDir(o.titleId, o.chapterId),
-    `${o.pageNumber}.${o.targetLang}.v${OVERLAY_VERSION}${suffix}.png`,
+    `${o.pageNumber}.${o.targetLang}.v${OVERLAY_VERSION}${suffix}.webp`,
   );
+}
+
+/** True when the flattened page for this target is already on disk. */
+export function isRendered(o: PageKey): boolean {
+  return fs.existsSync(imagePath(o, 'baked'));
 }
 
 function readOverlay(file: string): PageOverlay | null {
@@ -577,7 +596,7 @@ export async function renderPage(
 ): Promise<TranslatedPage> {
   const out = imagePath(opts, variant);
   if (fs.existsSync(out)) {
-    return { buffer: fs.readFileSync(out), mime: 'image/png', fromCache: true, translated: true };
+    return { buffer: fs.readFileSync(out), mime: 'image/webp', fromCache: true, translated: true };
   }
   const overlayFile = overlayPath(opts);
   const cachedOverlay = readOverlay(overlayFile);
@@ -620,13 +639,15 @@ export async function renderPage(
     for (const block of overlay.blocks) drawBlock(ctx, block, script);
   }
 
-  const buffer = canvas.toBuffer('image/png');
+  // Encoded off the main thread: the synchronous PNG encode stalled every other
+  // request, page images included, for the length of each render.
+  const buffer = await canvas.encode('webp', IMAGE_QUALITY);
   try {
     fs.writeFileSync(out, buffer);
   } catch {
     /* cache is best-effort */
   }
-  return { buffer, mime: 'image/png', fromCache: false, translated: true };
+  return { buffer, mime: 'image/webp', fromCache: false, translated: true };
 }
 
 /** Flattened page with the translation drawn in. */
@@ -637,6 +658,54 @@ export function translatePage(opts: TranslateOptions): Promise<TranslatedPage> {
 /** Look up a downloaded page's local path for a title/chapter. */
 export function pageLocalPath(titleId: string, chapterId: string, pageNumber: number): string | null {
   return pageFile(titleId, chapterId, pageNumber);
+}
+
+/**
+ * Deletes translation caches that no current code will read: `.trl/` files
+ * from other pipeline versions, and the flat `data/.ocr/*.json` cache of the
+ * first pipeline (keyed by file name alone, so it mixed chapters up). The
+ * traineddata tesseract keeps in that same folder is left alone.
+ *
+ * Left in place, superseded renders grew to several times the size of the
+ * scans they were made from.
+ */
+export async function sweepStaleTranslations(): Promise<{ files: number; bytes: number }> {
+  const current = `.v${OVERLAY_VERSION}.`;
+  let files = 0;
+  let bytes = 0;
+  const list = async (dir: string) => {
+    try {
+      return await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+  };
+  const remove = async (file: string) => {
+    try {
+      const { size } = await fsp.stat(file);
+      await fsp.unlink(file);
+      files++;
+      bytes += size;
+    } catch {
+      /* gone already, or in use: try again next start */
+    }
+  };
+
+  for (const title of await list(dataDir)) {
+    if (!title.isDirectory() || title.name.startsWith('.')) continue;
+    for (const chapter of await list(path.join(dataDir, title.name))) {
+      if (!chapter.isDirectory()) continue;
+      const trl = path.join(dataDir, title.name, chapter.name, '.trl');
+      for (const entry of await list(trl)) {
+        if (entry.isFile() && !entry.name.includes(current)) await remove(path.join(trl, entry.name));
+      }
+    }
+  }
+  const legacyOcr = path.join(dataDir, '.ocr');
+  for (const entry of await list(legacyOcr)) {
+    if (entry.isFile() && entry.name.endsWith('.json')) await remove(path.join(legacyOcr, entry.name));
+  }
+  return { files, bytes };
 }
 
 export { listPages };

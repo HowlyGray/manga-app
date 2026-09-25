@@ -27,7 +27,7 @@ image, per page or for an entire chapter at once.
     and text drawn over artwork is left alone.
 - **Two ways to read a translated page** — a live HTML text layer over the
   cleaned scan (selectable, sharp at any zoom, one click to see the original),
-  or a flattened PNG you can export. Both come from the same layout, so they
+  or a flattened image you can export. Both come from the same layout, so they
   always agree.
 - **Whole-chapter translation** — one click on the title page queues every page
   of a chapter; progress is reported live (the job tolerates server restarts
@@ -41,7 +41,7 @@ page → detect regions → recognize → group into bubbles → translate page
                                     ┌─────────────────────────┴──────────┐
                               erase bubbles                        layout text
                                     │                                    │
-                          clean PNG + HTML text layer          flattened PNG
+                         clean WebP + HTML text layer         flattened WebP
 ```
 
 1. **Pick the source language.** It comes from the *chapter*, not the title: a
@@ -74,9 +74,10 @@ page → detect regions → recognize → group into bubbles → translate page
    largest box that stays inside the balloon.
 
 Results are cached under the chapter folder (`.ocr/` for OCR JSON, `.trl/` for
-the layout JSON and rendered PNGs), so nothing is re-translated unless you clear
-the cache. Cache names carry a pipeline version; after an upgrade the old files
-are simply ignored, and `.trl/` can be deleted at any time.
+the layout JSON and rendered WebP pages), so nothing is re-translated unless you
+clear the cache. Cache names carry a pipeline version; files from any other
+version are deleted when the server starts, and `.trl/` can be deleted at any
+time.
 
 ## Sources
 
