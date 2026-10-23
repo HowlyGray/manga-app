@@ -79,6 +79,21 @@ export interface PageImage {
   headers?: Record<string, string>;
 }
 
+export interface ListChaptersOptions {
+  /**
+   * Only chapters added or changed after this moment. Honoured by providers
+   * that set `incremental`; the others ignore it and return everything.
+   */
+  since?: Date;
+  /**
+   * Languages the library already holds for this title, most used first. They
+   * break ties between equally readable translations in favour of the title's
+   * usual language, so a series does not hop between languages chapter by
+   * chapter.
+   */
+  prefer?: string[];
+}
+
 export interface SourceSearchResult {
   titles: SourceTitle[];
   /**
@@ -102,14 +117,23 @@ export interface SourceProvider {
    * would offer thousands of pages that cannot be fetched.
    */
   readonly maxOffset: number | null;
+  /**
+   * `listChapters` can be asked for what changed after a moment instead of the
+   * whole index. A series with a thousand chapters in a dozen languages is
+   * twenty requests to list in full and one or two to list incrementally.
+   */
+  readonly incremental?: boolean;
 
   search(params: SourceSearch): Promise<SourceSearchResult>;
   getTitle(id: string): Promise<SourceTitle | null>;
   /**
    * Chapters for a title, already reduced to one per chapter number in the
-   * language the pipeline reads best.
+   * language the pipeline reads best. With `since` that is only what changed
+   * after it, so a number the library already holds can come back in another
+   * language. Throws when the source cannot be read: an empty list means the
+   * title has no chapters, never that the request failed.
    */
-  listChapters(titleId: string): Promise<SourceChapter[]>;
+  listChapters(titleId: string, opts?: ListChaptersOptions): Promise<SourceChapter[]>;
   /** Page images of a chapter, in reading order. */
   chapterPages(chapterId: string): Promise<PageImage[]>;
   /** Fetches one image, applying whatever headers the provider requires. */

@@ -13,6 +13,12 @@ image, per page or for an entire chapter at once.
 - **Import & download** — save titles to a local library and download whole
   chapters (original or data-saver quality, rate-limited to be polite to MDex).
 - **Reader** — chapter browser with per-chapter downloads.
+- **Reading progress** — every chapter remembers how far you got, reaching its
+  last page marks it read, and a title's page says where to pick up.
+- **New chapters** — one click checks every saved series again and flags what
+  arrived since you last looked.
+- **Disk space** — see what each title takes, and get space back by clearing
+  translations, deleting a chapter's pages, or removing a title.
 - **Translation** — OCR and machine translation tuned for comics:
   - text regions are found by [RapidOCR](https://github.com/RapidAI/RapidOCR)'s
     script-agnostic detector, then recognized per region by `manga-ocr` for
@@ -84,6 +90,13 @@ time.
 The reader asks for a page's translation only once the page is within a screen
 of the viewport, and stops asking when you leave the chapter, so opening a
 chapter no longer translates all of it.
+
+Two requests for the same page, such as the text layer and the flattened image,
+or two open tabs, share one analysis rather than running OCR twice. Tesseract
+stays loaded for five minutes after a page instead of starting again for every
+one. Laying out a page pauses between balloons, so the reader's image requests
+are not held up behind it. On a downloaded page, the longest the server went
+without answering fell from about 350 ms to under 60 ms.
 
 ## Sources
 
@@ -184,6 +197,49 @@ only one chapter per number, in the language the OCR chain reads best.
 Translation is the one thing preview cannot do: the pipeline works on local
 files, so the control stays disabled until the chapter is downloaded.
 
+## Keeping up with a series
+
+**Reading is remembered per chapter**, for any title, saved or only previewed.
+Reaching a chapter's last page marks it read, and scrolling back up does not
+undo that. A title's page shows where to pick up (*Continue: Ch. 12 · p. 8*
+while a chapter is unfinished, *Next: Ch. 13* once it is done), how many
+chapters are read, and a **Mark read** toggle on each row for chapters read
+elsewhere. Opening a chapter goes back to the page you left, unless you
+finished it.
+
+**New chapters turn up by themselves.** The server looks for them shortly after
+it starts, every 30 minutes while it runs, and whenever the web app is opened,
+on whichever page it opens. A title is only looked at again once its last check
+is three hours old, so opening the app five times in an hour costs one check.
+The top bar says how far it is while it runs and how many chapters it found.
+Nothing is downloaded. New chapter numbers are marked NEW on the title's page,
+with a banner pointing at the first, and counted on its card until you open the
+title. A chapter that only turned up in another language does not count, and
+neither does one you already read in preview. A title's details (status,
+synopsis, tags) are refreshed by the same check, so *ongoing* turns to
+*completed* without anyone pressing anything.
+
+The check is incremental. The first time a title is looked at, every chapter is
+listed; after that only what was added or changed since the last check is asked
+for, which turns a series of a thousand chapters in a dozen languages from
+twenty requests into two or three. A source that cannot be read is reported and
+never mistaken for "nothing new": the title stays due for the next try, and a
+source that fails three titles in a row is left alone until the next check
+rather than asked about every remaining title. Sources are checked side by
+side, titles one at a time within each, at the source's rate limit.
+
+Opening a title's page also asks its source about it, unless it was checked in
+the last five minutes. **Refresh** on that page lists every chapter again, not
+only what changed, and offers a translation that reads better than the copy
+you hold for a chapter number; the page says how many it added, and the
+language filters show them. **Check for new chapters**, on the Library page,
+checks every title now instead of only the stale ones. `AUTO_UPDATE=0` turns
+the automatic checks off and leaves the buttons.
+
+Counts go by chapter number. The same number can be stored twice, for instance
+when a better translation of a chapter arrives after the first was saved; that
+is still one chapter to read, and *Next* skips to the next number.
+
 ## Cache
 
 Anything a source tells the app is kept, so browsing the same page twice costs
@@ -203,6 +259,24 @@ the upstream service nothing.
 Measured on a title outside the library: metadata 0.94s cold against 0.20s
 warm, a cover 1.02s against 0.21s.
 
+## Disk space
+
+The Library page shows how much is on disk, split into scanned pages and
+translations, and each card shows its title's size. A title's page has three
+ways to get space back:
+
+- **Clear translations** deletes the rendered pages and layouts under `.trl/`.
+  They are rebuilt the next time the title is read translated. OCR results are
+  kept, so the rebuild skips recognition but does translate again, which costs
+  API credit with Claude or DeepL.
+- **🗑** on a downloaded chapter deletes its pages. The chapter stays in the
+  list and can be downloaded again.
+- **Remove from library** deletes the title's folder, its cover, and its
+  reading history.
+
+Each one asks first, and none runs while that title is downloading or being
+translated.
+
 ## Chapter language preference
 
 A series often exists in several fan translations, and which one you download
@@ -221,13 +295,18 @@ DOWNLOAD_LANGS=pt-br,es,en npm run dev
 ```
 
 This only decides *which* translation gets downloaded; it is unrelated to the
-target language you read in. Chapters already on disk are never re-downloaded
-because a better language showed up — re-import the title and pick the language
-you want from the chapter list.
+target language you read in. Among translations that read equally well, the
+language the library already holds for the title wins, then the one that
+covers the most chapters, so a series does not change language from one chapter
+to the next. Chapters already on disk are never re-downloaded because a better
+language showed up. Checks for new chapters only add chapter numbers the
+library lacks; to get a better translation of a chapter you already have, press
+**Refresh** on the title's page and pick the language from the filters.
 
 ## Requirements
 
-- Node.js ≥ 20 (npm workspaces; `better-sqlite3` needs a working toolchain)
+- Node.js 22.12 or newer; CI runs 24 (npm workspaces; `better-sqlite3` needs a
+  working toolchain)
 - Python ≥ 3.10 — for the OCR sidecar. It is optional, but without it text
   detection falls back to whole-page tesseract, which is markedly worse on
   comics; it is worth installing even if you never read Japanese.
@@ -286,6 +365,24 @@ npm start -w server  # serves API + web/dist on PORT (default 5180)
 
 Open http://localhost:5180.
 
+## Tests
+
+```bash
+npm test
+```
+
+This runs the server suite and the web suite, both on Vitest. The server suite
+covers the API routes, the translation pipeline on a generated page, OCR
+caching, corrections, reading progress, new-chapter checks (what a refresh asks
+a source for, what it keeps, and how a failing source is handled), MangaDex's
+chapter listing and disk usage. The
+web suite covers how the reader requests translated pages, how a title decides
+where to continue, which chapters the reader moves between, and how the app
+follows the check for new chapters. Nothing reaches the network: each test file gets its
+own temporary library and database, sources are replaced by fakes, and any
+other `fetch` is refused. GitHub Actions runs the typecheck, the tests and the
+build on every push to `main` and on every pull request.
+
 ## Reading on your phone or tablet
 
 By default the app only listens on this machine. Build once and serve
@@ -326,8 +423,8 @@ Remove-NetFirewallRule -DisplayName "Manga app"
 ```
 
 **The app has no authentication.** Once opened to the network, anyone on it who
-opens the address gets full access — including the ability to download and
-delete-by-overwrite through the API. That is fine for a home network and not
+opens the address gets full access, including downloading, and removing titles
+and their files, through the API. That is fine for a home network and not
 fine for a shared or public one. Other *websites* are kept out either way: the
 API sends no CORS headers and refuses requests a browser marks as coming from
 another site, so a page you visit cannot read your library or start
@@ -369,6 +466,11 @@ npm run sync -w server -- <command> [options]
 | `DEEPL_API_URL`         | –            | Override the DeepL base URL                                    |
 | `DOWNLOAD_LANGS`        | –            | Preferred chapter languages, best first (e.g. `pt-br,es,en`)   |
 | `TRANSLATE_SRC`         | `ja`         | Source language **only** for chapters with no language set     |
+| `AUTO_UPDATE`           | `1`          | `0` stops the automatic checks for new chapters                |
+| `UPDATE_STALE_MS`       | `10800000`   | A title is checked again once its last check is this old (3 h) |
+| `UPDATE_INTERVAL_MS`    | `1800000`    | How often the running server checks for stale titles (30 min)  |
+| `UPDATE_START_MS`       | `5000`       | Delay before the first check after the server starts           |
+| `UPDATE_TITLE_MS`       | `300000`     | Opening a title page skips its check if done this recently (5 min) |
 | `CACHE_TITLE_MS`        | `604800000`  | How long cached title metadata stays fresh (7 days)            |
 | `CACHE_CHAPTERS_MS`     | `3600000`    | How long a cached chapter index stays fresh (1 hour)           |
 | `CACHE_COVER_CONCURRENCY` | `6`        | Parallel cover downloads when a grid first loads               |

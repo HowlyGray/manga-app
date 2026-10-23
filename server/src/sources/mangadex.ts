@@ -12,6 +12,7 @@ import {
   type MangaSort,
 } from '../api/mangadex';
 import type {
+  ListChaptersOptions,
   PageImage,
   SearchSort,
   SourceChapter,
@@ -132,6 +133,7 @@ export const mangadexProvider: SourceProvider = {
   browsable: true,
   // `Collections offset query param may not be >10000`.
   maxOffset: 10000,
+  incremental: true,
 
   async search(params: SourceSearch) {
     const { titles, total } = await searchManga({
@@ -171,8 +173,8 @@ export const mangadexProvider: SourceProvider = {
     return t ? toSourceTitle(t, 512) : null;
   },
 
-  async listChapters(titleId: string): Promise<SourceChapter[]> {
-    const chapters = await listChapters(titleId, { sort: 'asc' });
+  async listChapters(titleId: string, opts?: ListChaptersOptions): Promise<SourceChapter[]> {
+    const chapters = await listChapters(titleId, { sort: 'asc', since: opts?.since, prefer: opts?.prefer });
     return chapters.map((c) => ({
       id: c.id,
       chapter: c.chapter,

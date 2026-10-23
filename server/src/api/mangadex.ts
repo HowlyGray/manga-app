@@ -276,9 +276,55 @@ export async function getManga(id: string): Promise<MangaDexTitle | null> {
 
 export type ChapterSort = 'asc' | 'desc';
 
+/** `YYYY-MM-DDTHH:mm:ss` in UTC: the shape the `*Since` filters accept. */
+function apiTimestamp(date: Date): string {
+  return date.toISOString().slice(0, 19);
+}
+
+/**
+ * The manga feed hands out 500 chapters per request where `/chapter` stops at
+ * 100, and lists exactly the same ones: a 3000-chapter series is 6 requests
+ * instead of 30.
+ */
+const FEED_PAGE = 500;
+
+/**
+ * Every downloadable chapter the feed lists under `filters`, across pages.
+ *
+ * A page that fails throws. It used to count as an empty one, so an outage
+ * halfway through a long series returned the chapters before it and dropped the
+ * newest, and one at the first page made a title with hundreds of chapters look
+ * like it had none.
+ */
+async function feedPages(mangaId: string, filters: Record<string, string>): Promise<MangaDexChapter[]> {
+  const usable: MangaDexChapter[] = [];
+  let offset = 0;
+  for (;;) {
+    const query = new URLSearchParams();
+    query.append('contentRating[]', 'safe');
+    query.append('contentRating[]', 'suggestive');
+    query.set('limit', String(FEED_PAGE));
+    query.set('offset', String(offset));
+    query.append('includes[]', 'scanlation_group');
+    for (const [key, value] of Object.entries(filters)) query.set(key, value);
+
+    const res = await mdGet<ChapterListResponse>(`${BASE}/manga/${mangaId}/feed?${query.toString()}`);
+    if (!res) throw new Error(`MangaDex could not list the chapters (offset ${offset})`);
+    const batch = res.data ?? [];
+    for (const c of batch) {
+      const parsed = parseChapter(c);
+      if (!parsed.externalUrl && (parsed.pages ?? 0) > 0) usable.push(parsed);
+    }
+    if (batch.length === 0 || offset + batch.length >= (res.total ?? 0)) break;
+    offset += batch.length;
+  }
+  return usable;
+}
+
 /**
  * Returns usable (downloadable) chapters for a manga: no external license
- * redirect and at least one page, one per chapter number.
+ * redirect and at least one page, one per chapter number. With `since`, only
+ * those added or changed after it.
  *
  * Which translation wins matters more than it looks: after the 2025 takedowns
  * many series only survive in minor languages, and picking the wrong one feeds
@@ -287,38 +333,46 @@ export type ChapterSort = 'asc' | 'desc';
  */
 export async function listChapters(
   mangaId: string,
-  opts: { sort?: ChapterSort } = {},
+  opts: { sort?: ChapterSort; since?: Date; prefer?: string[] } = {},
 ): Promise<MangaDexChapter[]> {
-  const sort = opts.sort ?? 'asc';
-  const all: MangaDexChapter[] = [];
-  let offset = 0;
-  const limit = 100;
-
-  for (;;) {
-    const query = new URLSearchParams();
-    query.set('manga', mangaId);
-    query.append('contentRating[]', 'safe');
-    query.append('contentRating[]', 'suggestive');
-    query.set('order[chapter]', sort);
-    query.set('limit', String(limit));
-    query.set('offset', String(offset));
-    query.append('includes[]', 'scanlation_group');
-
-    const res = await mdGet<ChapterListResponse>(`${BASE}/chapter?${query.toString()}`);
-    const batch = res?.data ?? [];
-    for (const c of batch) {
-      const parsed = parseChapter(c);
-      if (!parsed.externalUrl && (parsed.pages ?? 0) > 0) all.push(parsed);
-    }
-    const total = res?.total ?? 0;
-    if (offset + batch.length >= total || batch.length === 0) break;
-    offset += batch.length;
+  const order = { 'order[chapter]': opts.sort ?? 'asc' };
+  let all: MangaDexChapter[];
+  if (opts.since) {
+    const since = apiTimestamp(opts.since);
+    // A chapter scheduled ahead is uploaded long before anyone can read it, so
+    // its `updatedAt` predates the check that should find it and its
+    // `publishAt` does not. Asking for both leaves no gap.
+    const edited = await feedPages(mangaId, { ...order, updatedAtSince: since });
+    const published = await feedPages(mangaId, { ...order, publishAtSince: since });
+    all = [...new Map([...edited, ...published].map((c) => [c.id, c] as const)).values()];
+  } else {
+    all = await feedPages(mangaId, order);
   }
 
   const rank = languageRanker(config.translate.chapterLanguages);
+  // Translations the pipeline reads equally well are told apart by habit, then
+  // by how much of the series each covers. Without that the winner was whichever
+  // the API listed first for each number: a 440-chapter series came back in
+  // twelve languages, one per chapter at random.
+  const habit = new Map((opts.prefer ?? []).map((language, i) => [language, i] as const));
+  const habitOf = (language: string) => habit.get(language) ?? habit.size;
+  const covered = new Map<string, Set<string>>();
+  for (const c of all) {
+    const numbers = covered.get(c.language) ?? new Set<string>();
+    numbers.add(c.chapter ?? c.id);
+    covered.set(c.language, numbers);
+  }
+  const coverage = (language: string) => covered.get(language)?.size ?? 0;
+
   const seen = new Set<string>();
   const deduped = [...all]
-    .sort((a, b) => rank(a.language) - rank(b.language))
+    .sort(
+      (a, b) =>
+        rank(a.language) - rank(b.language) ||
+        habitOf(a.language) - habitOf(b.language) ||
+        coverage(b.language) - coverage(a.language) ||
+        a.language.localeCompare(b.language),
+    )
     .filter((c) => {
       const key = c.chapter ?? c.id;
       if (seen.has(key)) return false;

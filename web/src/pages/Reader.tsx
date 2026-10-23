@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
 import PageFrame from '../components/PageFrame';
 import { usePageOverlays } from '../hooks';
+import { isTypingTarget, neighbours } from '../reading';
 import type {
   ChapterDetailResponse,
   ChapterView,
@@ -51,6 +52,8 @@ export default function Reader() {
   const imgRefs = useRef<(HTMLImageElement | null)[]>([]);
   const saveTimer = useRef<number | undefined>(undefined);
   const restored = useRef(false);
+  /** Page index to reopen the current chapter at. */
+  const resumeAt = useRef(0);
 
   const overlayActive = Boolean(translateLang) && textMode === 'overlay';
   const {
@@ -80,6 +83,11 @@ export default function Reader() {
     let cancelled = false;
     setDetail(null);
     setError('');
+    // Each chapter starts from its own position. The index used to carry over
+    // from the previous chapter, which in page mode read past the end of a
+    // shorter one and saved that page against the new chapter.
+    setPageIndex(0);
+    resumeAt.current = 0;
     restored.current = false;
     if (!id || !chapterId) return;
 
@@ -95,16 +103,19 @@ export default function Reader() {
         const local = ti.inLibrary ? await api.chapter(id!, chapterId!).catch(() => null) : null;
         if (cancelled) return;
 
-        if (local && local.chapter.downloaded === 1) {
-          setDetail(local);
-          setPreview(false);
-        } else {
-          setDetail(await api.previewChapter(id!, chapterId!));
-          setPreview(true);
-        }
+        const loaded =
+          local && local.chapter.downloaded === 1 ? local : await api.previewChapter(id!, chapterId!);
+        if (cancelled) return;
         if (ti.progress?.chapter_id === chapterId) {
           setMode(ti.progress.mode === 'page' ? 'page' : 'scroll');
         }
+        // Resume where this chapter was left, unless it was finished.
+        const read = ti.chapters.items.find((c) => c.id === chapterId)?.read;
+        resumeAt.current =
+          read && !read.finished ? Math.max(0, Math.min(read.page, loaded.pages.length) - 1) : 0;
+        setPageIndex(resumeAt.current);
+        setDetail(loaded);
+        setPreview(loaded !== local);
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
       }
@@ -150,7 +161,6 @@ export default function Reader() {
   }
 
   const pages = detail?.pages ?? [];
-  const downloaded = detail?.chapter.downloaded === 1;
   const ready = pages.length > 0;
   const targets = languages?.targets ?? FALLBACK_TARGETS;
 
@@ -182,8 +192,7 @@ export default function Reader() {
   useEffect(() => {
     if (!ready || mode !== 'scroll' || restored.current) return;
     restored.current = true;
-    const saved = titleInfo?.progress;
-    const target = saved && saved.chapter_id === chapterId ? saved.page - 1 : 0;
+    const target = resumeAt.current;
     if (target <= 0) return;
     let tries = 0;
     const tick = () => {
@@ -213,6 +222,14 @@ export default function Reader() {
           if (top <= line) cur = i;
           else break;
         }
+        // A short last page never scrolls up to the line, so reaching the
+        // bottom counts as reaching it -- once it has loaded: before that the
+        // document is short and every chapter would start "finished".
+        const lastIndex = imgRefs.current.length - 1;
+        const last = imgRefs.current[lastIndex];
+        const atBottom =
+          window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
+        if (atBottom && last?.complete && last.naturalHeight > 0) cur = lastIndex;
         setPageIndex(cur);
       });
     };
@@ -222,20 +239,24 @@ export default function Reader() {
 
   function scheduleSave(page: number) {
     if (!id || !chapterId) return;
+    const total = pages.length;
     window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
-      api.setProgress(id!, chapterId!, page + 1, mode).catch(() => {});
+      // The page count lets the server mark the chapter finished on its last page.
+      api.setProgress(id!, chapterId!, page + 1, mode, total).catch(() => {});
     }, 350);
   }
 
+  // Saved for previews too: reading is remembered per chapter, saved or not.
   useEffect(() => {
-    if (detail && downloaded) scheduleSave(pageIndex);
+    if (detail && pageIndex < pages.length) scheduleSave(pageIndex);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pageIndex, mode]);
+  }, [pageIndex, mode, detail]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (mode !== 'page' || !ready) return;
+      if (isTypingTarget(e.target)) return;
       if (e.key === 'ArrowRight') setPageIndex((p) => Math.min(pages.length - 1, p + 1));
       if (e.key === 'ArrowLeft') setPageIndex((p) => Math.max(0, p - 1));
     };
@@ -255,10 +276,8 @@ export default function Reader() {
   }, [overlayActive, shownPage, shownStatus, pageIndex, pages, requestOverlay]);
 
   const chapters = titleInfo?.chapters.items ?? [];
-  const idx = chapters.findIndex((c) => c.id === chapterId);
-  const prev = idx > 0 ? chapters[idx - 1] : null;
-  const next = idx >= 0 && idx < chapters.length - 1 ? chapters[idx + 1] : null;
-  const current = chapters[idx];
+  const current = chapters.find((c) => c.id === chapterId);
+  const { prev, next } = neighbours(chapters, chapterId);
 
   if (!detail) {
     return (

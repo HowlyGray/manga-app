@@ -141,6 +141,41 @@ CREATE TABLE IF NOT EXISTS correction_words (
 );
 `;
 
+/**
+ * How far each chapter has been read. Keyed by chapter with no foreign key to
+ * the library, so chapters read in preview -- before the title is saved -- are
+ * remembered too. `finished` is sticky: scrolling back up a finished chapter
+ * does not make it unread. Supersedes `reading_progress`, which kept a single
+ * position per title and nothing for titles outside the library; its rows are
+ * carried over. Timestamps have millisecond precision because "the chapter
+ * being read" is simply the latest row.
+ */
+const CHAPTER_READS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS chapter_reads (
+  chapter_id TEXT PRIMARY KEY,
+  title_id TEXT NOT NULL,
+  page INTEGER NOT NULL DEFAULT 0,
+  pages INTEGER,
+  finished INTEGER NOT NULL DEFAULT 0,
+  mode TEXT NOT NULL DEFAULT 'scroll',
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chapter_reads_title ON chapter_reads(title_id, updated_at);
+INSERT OR IGNORE INTO chapter_reads (chapter_id, title_id, page, mode, updated_at)
+  SELECT chapter_id, title_id, page, mode, replace(updated_at, ' ', 'T') || '.000Z' FROM reading_progress;
+`;
+
+/**
+ * When a title's chapter list was last checked, and when it was last looked
+ * at: chapters added after `seen_at` are "new". Existing titles count as seen
+ * now, so upgrading does not flag every chapter already there.
+ */
+const TITLE_UPDATES_SCHEMA = `
+ALTER TABLE titles ADD COLUMN seen_at TEXT;
+ALTER TABLE titles ADD COLUMN checked_at TEXT;
+UPDATE titles SET seen_at = datetime('now');
+`;
+
 function migrate(db: Database.Database): void {
   const version = db.pragma('user_version', { simple: true }) as number;
   if (version < 1) {
@@ -160,6 +195,14 @@ function migrate(db: Database.Database): void {
   if (version < 4) {
     db.exec(CORRECTION_WORDS_SCHEMA);
     db.pragma('user_version = 4');
+  }
+  if (version < 5) {
+    db.exec(CHAPTER_READS_SCHEMA);
+    db.pragma('user_version = 5');
+  }
+  if (version < 6) {
+    db.exec(TITLE_UPDATES_SCHEMA);
+    db.pragma('user_version = 6');
   }
 }
 

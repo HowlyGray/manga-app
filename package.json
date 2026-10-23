@@ -16,7 +16,8 @@
     "build": "npm run build -w web",
     "serve": "npm run build && npm start -w server",
     "serve:lan": "npm run build && npm run start:lan -w server",
-    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
+    "test": "npm run test -w server && npm run test -w web"
   },
   "devDependencies": {
     "concurrently": "^10.0.5"

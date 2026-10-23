@@ -99,6 +99,7 @@ async function downloadCover(libraryId: string, url: string): Promise<string | n
 }
 
 export interface RemoteChapter {
+  /** Library id (`provider:` prefix outside MangaDex), same as once imported. */
   id: string;
   chapter: string | null;
   title: string | null;
@@ -180,7 +181,11 @@ export async function remoteTitleDetail(
     chapters: {
       total: chapters.length,
       items: chapters.map((c) => ({
-        id: c.id,
+        // Library ids, not the provider's: preview, download and reading
+        // progress all take library ids, and a bare WeebCentral id was taken
+        // for a MangaDex one (so downloading it failed, and it fails the id
+        // check outright).
+        id: encodeId(provider.id, c.id),
         chapter: c.chapter,
         title: c.title,
         volume: c.volume,
@@ -213,6 +218,13 @@ export async function importTitle(libraryId: string): Promise<ImportResult> {
   if (!t) throw new Error(`${providerId} not found on ${provider.label}`);
 
   const id = encodeId(provider.id, providerId);
+  const startedAt = new Date();
+  const alreadySaved = lib.getTitle(id) != null;
+
+  // Listed before anything is saved, so a source that cannot be read does not
+  // leave a title in the library with no chapters and nothing to say why.
+  const chapters = await provider.listChapters(providerId, { prefer: lib.languagesByUse(id) });
+
   rememberTitle(id, t);
   const coverLocal = t.coverUrl ? await downloadCover(id, t.coverUrl) : null;
 
@@ -232,8 +244,14 @@ export async function importTitle(libraryId: string): Promise<ImportResult> {
     coverLocal,
   });
 
-  const chapters = await provider.listChapters(providerId);
-  for (const c of chapters) upsertChapterForTitle(provider, id, c);
+  lib.transaction(() => {
+    for (const c of chapters) upsertChapterForTitle(provider, id, c);
+  });
+  // Chapters that arrive with a first import are not news. Importing a title
+  // that is already saved leaves what is new alone: it used to reset it, so a
+  // manual sync swallowed the very chapters it had just found.
+  if (!alreadySaved) lib.markSeen(id);
+  lib.markChecked(id, startedAt);
 
   let score: number | null = null;
   try {
@@ -247,6 +265,117 @@ export async function importTitle(libraryId: string): Promise<ImportResult> {
   }
 
   return { id, source: provider.id, title: t.title, chaptersImported: chapters.length, score };
+}
+
+export interface RefreshResult {
+  /** Chapters stored for the first time. */
+  added: number;
+  /** Of those, translations that read better than the copy already held under their number. */
+  upgrades: number;
+  /** Of those, the news: the first copy of a chapter number the library lacked, not read already. */
+  fresh: string[];
+  /** Chapter numbers among `fresh`, counted the way the library badges count them. */
+  news: number;
+  /** The source describes the title differently now (status, synopsis, tags…). */
+  detailsChanged: boolean;
+  /** Only what changed since the last check was listed, not every chapter. */
+  incremental: boolean;
+}
+
+/**
+ * A chapter list fetched at the start of a check can miss what is uploaded
+ * while it runs, and clocks differ a little. The next incremental check looks
+ * back this far from the last one's start, so nothing slips between the two.
+ */
+const LOOKBACK_MS = 30 * 60_000;
+
+const refreshing = new Map<string, Promise<RefreshResult>>();
+
+/**
+ * Brings a saved title up to date with its source: its details, and the
+ * chapters it did not have. This is what makes new chapters appear without
+ * anyone pressing a sync button; the cover, the MyAnimeList score and the
+ * pages themselves are left alone.
+ *
+ * After a first check only what changed since is asked for, which turns a
+ * series of a thousand chapters from twenty requests into two. `full` is the
+ * user asking for everything: every chapter is listed again, and a translation
+ * that reads better than the one stored for a number is offered next to it.
+ * A title already being refreshed shares that refresh.
+ */
+export function refreshTitle(libraryId: string, opts: { full?: boolean } = {}): Promise<RefreshResult> {
+  const key = `${libraryId}|${opts.full ? 'full' : 'incremental'}`;
+  const running = refreshing.get(key);
+  if (running) return running;
+  const task = runRefresh(libraryId, opts.full === true).finally(() => refreshing.delete(key));
+  refreshing.set(key, task);
+  return task;
+}
+
+async function runRefresh(libraryId: string, full: boolean): Promise<RefreshResult> {
+  if (!lib.getTitle(libraryId)) throw new Error('not in the library');
+  const { provider: source, providerId } = decodeId(libraryId);
+  const provider = getProvider(source);
+  const startedAt = new Date();
+
+  // null is a title the source no longer has, or a hiccup: either way the
+  // stored details stay.
+  const latest = await provider.getTitle(providerId);
+  let detailsChanged = false;
+  if (latest) {
+    rememberTitle(libraryId, latest);
+    detailsChanged = lib.updateTitleDetails(libraryId, latest);
+  }
+
+  const checkedAt = lib.getChecked(libraryId);
+  const since =
+    provider.incremental && !full && checkedAt ? new Date(checkedAt.getTime() - LOOKBACK_MS) : undefined;
+  const chapters = await provider.listChapters(providerId, { since, prefer: lib.languagesByUse(libraryId) });
+  if (!since) {
+    // A page that stopped parsing and an outage both look like a title with no
+    // chapters. Believing it would stamp the title as checked and look away
+    // for hours; saying so keeps it due for the next try.
+    if (chapters.length === 0 && lib.chapterIndex(libraryId).ids.size > 0) {
+      throw new Error(`${provider.label} returned no chapters`);
+    }
+    // The cached index is the whole index; a partial one would hide the rest.
+    rememberChapters(libraryId, chapters);
+  }
+
+  const rank = languageRanker(config.translate.chapterLanguages);
+  const held = lib.chapterIndex(libraryId);
+  const reads = lib.readsFor(libraryId);
+  const fresh: string[] = [];
+  const news = new Set<string>();
+  let added = 0;
+  let upgrades = 0;
+  lib.transaction(() => {
+    for (const c of chapters) {
+      const id = encodeId(provider.id, c.id);
+      if (!held.ids.has(id)) {
+        const languages = c.chapter ? held.languages.get(c.chapter) : undefined;
+        if (languages) {
+          // A number the library already holds. A source offers one language
+          // per number but not always the one that is stored: translations
+          // catch up over the years, and a series stored chapter by chapter
+          // in a dozen languages has a better one waiting under most numbers.
+          // Taking them on every check stacked 140 second copies on a
+          // 440-chapter series. Only an explicit full refresh offers a
+          // translation that reads better, as re-importing always did; a check
+          // just adds the chapters that are missing.
+          if (!full || languages.some((language) => rank(language) <= rank(c.language))) continue;
+          upgrades++;
+        } else if (!reads.get(id)?.finished) {
+          fresh.push(id);
+          news.add(c.chapter ?? id);
+        }
+        added++;
+      }
+      upsertChapterForTitle(provider, libraryId, c);
+    }
+  });
+  lib.markChecked(libraryId, startedAt);
+  return { added, upgrades, fresh, news: news.size, detailsChanged, incremental: since !== undefined };
 }
 
 /**
