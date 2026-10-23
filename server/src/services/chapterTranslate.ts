@@ -100,6 +100,15 @@ async function runJob(
   job.running = false;
 }
 
+/** Chapters of a title with a translation job running, in any target language. */
+export function translatingChapters(titleId: string): Set<string> {
+  const out = new Set<string>();
+  for (const job of jobs.values()) {
+    if (job.running && job.titleId === titleId) out.add(job.chapterId);
+  }
+  return out;
+}
+
 export function getChapterTranslateStatus(titleId: string, chapterId: string, targetLang: string): ChapterTranslateJob | null {
   return jobs.get(jobKey(titleId, chapterId, targetLang)) ?? null;
 }

@@ -1,33 +1,11 @@
-import express from 'express';
-import fs from 'node:fs';
 import os from 'node:os';
-import path from 'node:path';
-import { guardApi } from './access';
+import { createApp } from './app';
 import { config } from './config';
 import { getDb } from './db';
-import { apiRouter } from './routes/api';
 import { sweepStaleTranslations } from './services/imgtranslate';
+import { scheduleUpdateChecks } from './services/updates';
 
-const app = express();
-
-// No CORS: the UI is same-origin, so cross-origin access only ever served other
-// sites. The guard also refuses requests that other sites trigger.
-app.use('/api', guardApi);
-app.use(express.json({ limit: '1mb' }));
-app.use('/api', apiRouter);
-
-const webDist = path.resolve(import.meta.dirname, '..', '..', 'web', 'dist');
-if (fs.existsSync(webDist)) {
-  app.use(express.static(webDist));
-  app.use((req, res, next) => {
-    if (req.method !== 'GET' || req.path.startsWith('/api')) return next();
-    res.sendFile(path.join(webDist, 'index.html'));
-  });
-}
-
-app.use((req, res) => {
-  res.status(404).json({ error: `not found: ${req.method} ${req.path}` });
-});
+const app = createApp();
 
 /** Non-loopback IPv4 addresses, so the console can print reachable URLs. */
 function lanAddresses(): string[] {
@@ -52,6 +30,19 @@ app.listen(config.port, config.host, () => {
   }
   console.log(`  library: ${config.libraryDir}`);
   console.log(`  db:      ${config.dataDir}`);
+
+  // New chapters are looked for without anyone asking, so they are there when
+  // the app is opened.
+  scheduleUpdateChecks();
+  if (config.updates.enabled) {
+    const minutes = (ms: number) => Math.round(ms / 60_000);
+    console.log(
+      `  updates: new chapters checked at start and every ${minutes(config.updates.intervalMs)} min ` +
+        `(a title is re-read after ${minutes(config.updates.staleMs)} min)`,
+    );
+  } else {
+    console.log('  updates: automatic checks are off (AUTO_UPDATE=0)');
+  }
 
   // Superseded translation renders are never read again. Reclaim the space in
   // the background so a large library does not hold up startup.

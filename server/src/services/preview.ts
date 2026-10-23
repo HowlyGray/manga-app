@@ -11,6 +11,7 @@
  */
 import { config } from '../config';
 import { decodeId, encodeId, getProvider, type PageImage, type SourceChapter } from '../sources';
+import { getChapter } from './library';
 import { cachedChapters, cachedPages, rememberChapters, rememberPages } from './sourceCache';
 
 export interface PreviewChapter {
@@ -43,6 +44,24 @@ export async function previewChapterInfo(
   titleLibraryId: string,
   chapterLibraryId: string,
 ): Promise<SourceChapter | null> {
+  // A chapter the library holds is described by its own row. Reading one that a
+  // check just found used to list the whole title at the source first, which
+  // for a long MangaDex series is several requests before the first page.
+  const saved = getChapter(titleLibraryId, chapterLibraryId);
+  if (saved) {
+    return {
+      id: saved.provider_id,
+      chapter: saved.chapter_number,
+      title: saved.chapter_title,
+      volume: saved.volume,
+      language: saved.language ?? '',
+      pages: saved.pages,
+      scanlator: saved.scanlator,
+      publishedAt: saved.published_at,
+      externalUrl: saved.external_url,
+    };
+  }
+
   const { provider: source, providerId: titleId } = decodeId(titleLibraryId);
   const provider = getProvider(source);
 

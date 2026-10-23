@@ -72,10 +72,22 @@ export interface LibraryTitle {
   tags: string[];
   cover_local: string | null;
   jikan_score: number | null;
+  /** Chapter numbers; a number stored in two languages counts once. */
   total_chapters: number;
   downloaded_chapters: number;
+  /** Chapter numbers marked finished. */
+  read_chapters: number;
+  /** Chapter numbers added since the title was last opened. */
+  new_chapters: number;
   progress_chapter_id: string | null;
   progress_page: number;
+}
+
+/** How far one chapter has been read. */
+export interface ChapterRead {
+  page: number;
+  pages: number | null;
+  finished: boolean;
 }
 
 export interface ChapterView {
@@ -91,12 +103,53 @@ export interface ChapterView {
   publishedAt: string | null;
   downloaded: number;
   downloadError: string | null;
+  /** Null until the chapter has been opened; absent in reader payloads. */
+  read?: ChapterRead | null;
+  /** Added since the title was last opened (library titles only). */
+  isNew?: boolean;
+}
+
+/** Bytes on disk for a title, by kind. */
+export interface Usage {
+  pages: number;
+  translations: number;
+  ocr: number;
+}
+
+/** The library-wide check for new chapters. */
+export interface UpdateCheck {
+  running: boolean;
+  total: number;
+  checked: number;
+  found: number;
+  failed: { id: string; title: string; error: string }[];
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+/** What refreshing one saved title found. */
+export interface RefreshResult {
+  /** False when the title was checked a moment ago and the source was not asked again. */
+  refreshed: boolean;
+  /** Chapters stored for the first time. */
+  added: number;
+  /** Of those, translations that read better than the copy already held under their number. */
+  upgrades: number;
+  /** Ids of those that are news. */
+  fresh: string[];
+  /** Chapter numbers among them, counted the way the library badges count. */
+  news: number;
+  detailsChanged: boolean;
+  incremental: boolean;
+  checkedAt: string | null;
 }
 
 export interface Progress {
   title_id: string;
   chapter_id: string | null;
   page: number;
+  pages?: number | null;
+  finished?: boolean;
   mode: string;
 }
 
@@ -119,6 +172,8 @@ export interface TitleView {
 
 export interface TitleDetailResponse {
   inLibrary: boolean;
+  /** When the source was last asked about this title; saved titles only. */
+  checkedAt?: string | null;
   coverUrl: string | null;
   title: TitleView;
   languages: string[];

@@ -10,10 +10,13 @@ import type {
   ChapterTranslateState,
   HomeResponse,
   PageOverlay,
+  RefreshResult,
   SearchSort,
   SourceInfo,
   Tag,
   TranslateLanguages,
+  UpdateCheck,
+  Usage,
 } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -122,10 +125,65 @@ export const api = {
     return request<Progress>(`/api/progress/${titleId}`);
   },
 
-  setProgress(titleId: string, chapterId: string, page: number, mode: string) {
+  /** `pages` lets the server mark the chapter finished on its last page. */
+  setProgress(titleId: string, chapterId: string, page: number, mode: string, pages?: number) {
     return request<{ ok: boolean }>('/api/progress', {
       method: 'POST',
-      body: JSON.stringify({ titleId, chapterId, page, mode }),
+      body: JSON.stringify({ titleId, chapterId, page, mode, pages }),
+    });
+  },
+
+  /**
+   * Starts the library-wide check for new chapters (or joins the running one).
+   * `stale` leaves out titles checked recently, which is what opening the app asks.
+   */
+  checkUpdates(opts: { stale?: boolean } = {}) {
+    return request<UpdateCheck>(`/api/library/check-updates${opts.stale ? '?stale=1' : ''}`, { method: 'POST' });
+  },
+
+  /** Looks for new chapters of one saved title; `full` lists all of its chapters again. */
+  refreshTitle(titleId: string, full = false) {
+    return request<RefreshResult>(`/api/library/${titleId}/refresh${full ? '?full=1' : ''}`, { method: 'POST' });
+  },
+
+  updateCheckStatus() {
+    return request<UpdateCheck>('/api/library/check-updates');
+  },
+
+  libraryUsage() {
+    return request<{ titles: ({ id: string } & Usage)[]; total: Usage }>('/api/library/usage');
+  },
+
+  titleUsage(titleId: string) {
+    return request<Usage>(`/api/library/${titleId}/usage`);
+  },
+
+  /** Removes a title with its pages and caches. */
+  removeTitle(titleId: string) {
+    return request<{ freed: number }>(`/api/library/${titleId}`, { method: 'DELETE' });
+  },
+
+  /** Deletes a chapter's downloaded pages; it can be downloaded again. */
+  deleteChapterFiles(titleId: string, chapterId: string) {
+    return request<{ freed: number }>(`/api/library/${titleId}/chapters/${chapterId}/files`, {
+      method: 'DELETE',
+    });
+  },
+
+  /** Deletes a title's translated renders; they are rebuilt when next read. */
+  clearTranslations(titleId: string) {
+    return request<{ freed: number }>(`/api/library/${titleId}/translations`, { method: 'DELETE' });
+  },
+
+  /** The title page was opened: its chapters stop counting as new. */
+  markSeen(titleId: string) {
+    return request<{ ok: boolean }>(`/api/library/${titleId}/seen`, { method: 'POST' });
+  },
+
+  markChapterRead(titleId: string, chapterId: string, finished: boolean) {
+    return request<{ ok: boolean }>(`/api/library/${titleId}/chapters/${chapterId}/read`, {
+      method: 'POST',
+      body: JSON.stringify({ finished }),
     });
   },
 

@@ -181,12 +181,9 @@ export const weebcentralProvider: SourceProvider = {
   },
 
   async listChapters(titleId: string): Promise<SourceChapter[]> {
-    let html: string;
-    try {
-      html = await getHtml(`${BASE}/series/${encodeURIComponent(titleId)}/full-chapter-list`);
-    } catch {
-      return [];
-    }
+    // A request that fails throws, where a page that parses to nothing yields an
+    // empty list: callers have to tell an outage from a title with no chapters.
+    const html = await getHtml(`${BASE}/series/${encodeURIComponent(titleId)}/full-chapter-list`);
 
     const chapters: SourceChapter[] = [];
     // Each row is an anchor to /chapters/<id> wrapping the chapter's label, and

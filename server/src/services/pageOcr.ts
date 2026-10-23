@@ -53,12 +53,11 @@ function withOcrSlot<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /** Opens a tesseract worker, remembering languages whose data cannot be had. */
-async function openWorker(lang: string, psm: PSM): Promise<{ worker: Worker; lang: string } | null> {
+async function openWorker(lang: string): Promise<{ worker: Worker; lang: string } | null> {
   const attempts = unavailableLangs.has(lang) ? ['eng'] : [lang, 'eng'];
   for (const candidate of attempts) {
     try {
       const worker = await createWorker(candidate, 1, { cachePath: traineddataDir } as never);
-      await worker.setParameters({ tessedit_pageseg_mode: psm });
       return { worker, lang: candidate };
     } catch (err) {
       unavailableLangs.add(candidate);
@@ -71,6 +70,63 @@ async function openWorker(lang: string, psm: PSM): Promise<{ worker: Worker; lan
   return null;
 }
 
+/** How long a loaded tesseract worker is kept after its last use. */
+const WORKER_IDLE_MS = 5 * 60_000;
+
+interface WarmWorker {
+  worker: Worker;
+  /** traineddata actually loaded (`eng` when the language had none). */
+  lang: string;
+  idle: NodeJS.Timeout | null;
+}
+
+/** One loaded worker per language, kept between pages. */
+const warm = new Map<string, Promise<WarmWorker | null>>();
+
+/**
+ * Runs `fn` with a loaded tesseract worker for `lang`.
+ *
+ * Workers used to be created and torn down for every page, and again for the
+ * re-read pass, reloading the WASM engine and the traineddata each time. They
+ * now stay loaded until idle for a while. OCR is serialized (`withOcrSlot`), so
+ * a worker is never used by two callers at once.
+ */
+async function useWorker<T>(
+  lang: string,
+  psm: PSM,
+  fn: (worker: Worker, lang: string) => Promise<T>,
+): Promise<T | null> {
+  let entry = warm.get(lang);
+  if (!entry) {
+    entry = openWorker(lang).then((opened) => (opened ? { ...opened, idle: null } : null));
+    warm.set(lang, entry);
+  }
+  const held = await entry;
+  if (!held) {
+    warm.delete(lang);
+    return null;
+  }
+  if (held.idle) clearTimeout(held.idle);
+  held.idle = null;
+  try {
+    await held.worker.setParameters({ tessedit_pageseg_mode: psm });
+    return await fn(held.worker, held.lang);
+  } catch (err) {
+    // A worker that failed mid-page is not trusted with the next one.
+    warm.delete(lang);
+    void held.worker.terminate().catch(() => {});
+    throw err;
+  } finally {
+    if (warm.get(lang) === entry) {
+      held.idle = setTimeout(() => {
+        warm.delete(lang);
+        void held.worker.terminate().catch(() => {});
+      }, WORKER_IDLE_MS);
+      held.idle.unref?.();
+    }
+  }
+}
+
 /**
  * Recognizes pre-detected boxes one at a time in single-line mode. Small crops
  * are upscaled first: tesseract needs roughly 30px of cap height to be
@@ -81,12 +137,9 @@ async function recognizeCrops(
   boxes: MangaOcrLine[],
   spec: LangSpec,
 ): Promise<{ lines: OcrLine[]; lang: string } | null> {
-  const opened = await openWorker(spec.tesseract, PSM.SINGLE_LINE);
-  if (!opened) return null;
-
   const img = await loadImage(localPath);
-  const lines: OcrLine[] = [];
-  try {
+  return useWorker(spec.tesseract, PSM.SINGLE_LINE, async (worker, lang) => {
+    const lines: OcrLine[] = [];
     for (const box of boxes) {
       const pad = Math.max(3, Math.round((box.y1 - box.y0) * 0.18));
       const sx = Math.max(0, box.x0 - pad);
@@ -102,16 +155,14 @@ async function recognizeCrops(
       cropCtx.fillRect(0, 0, crop.width, crop.height);
       cropCtx.drawImage(img, sx, sy, sw, sh, 0, 0, crop.width, crop.height);
 
-      const { data } = await opened.worker.recognize(crop.toBuffer('image/png'));
+      const { data } = await worker.recognize(crop.toBuffer('image/png'));
       const text = (data.text ?? '').replace(/\s+/g, ' ').trim();
       const conf = data.confidence ?? 0;
       if (!text) continue;
       lines.push({ text, conf, x0: box.x0, y0: box.y0, x1: box.x1, y1: box.y1 });
     }
-  } finally {
-    await opened.worker.terminate();
-  }
-  return { lines, lang: opened.lang };
+    return { lines, lang };
+  });
 }
 
 /** Whole-page tesseract, used only when the detection sidecar is unavailable. */
@@ -121,11 +172,8 @@ async function tesseractPage(
 ): Promise<{ lines: OcrLine[]; lang: string } | null> {
   // Sparse text mode makes no assumption about columns or reading order, which
   // is much closer to how a comic page is laid out than the default.
-  const opened = await openWorker(spec.tesseract, PSM.SPARSE_TEXT);
-  if (!opened) return null;
-
-  try {
-    const { data } = await opened.worker.recognize(localPath, {}, { text: true, blocks: true });
+  return useWorker(spec.tesseract, PSM.SPARSE_TEXT, async (worker, lang) => {
+    const { data } = await worker.recognize(localPath, {}, { text: true, blocks: true });
     const lines: OcrLine[] = [];
     for (const block of data.blocks ?? []) {
       for (const para of block.paragraphs ?? []) {
@@ -138,10 +186,8 @@ async function tesseractPage(
         }
       }
     }
-    return { lines, lang: opened.lang };
-  } finally {
-    await opened.worker.terminate();
-  }
+    return { lines, lang };
+  });
 }
 
 /** Region of a page to re-read, tagged with the block it belongs to. */
@@ -162,11 +208,15 @@ export interface RefineRegion {
  * balloon can be handed to tesseract as one uniform block, which reads all of
  * its lines together and in order. Returns raw text per region id; the caller
  * decides whether it beats what the first pass assembled.
+ *
+ * Results are cached per page when `page` is given. The same page and balloons
+ * always re-read the same way, and every render used to run this again.
  */
 export async function refineRegions(
   localPath: string,
   regions: RefineRegion[],
   sourceLang: string,
+  page?: { titleId: string; chapterId: string; pageNumber: number },
 ): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   if (regions.length === 0) return out;
@@ -175,11 +225,20 @@ export async function refineRegions(
   // Japanese pages keep the first pass as-is.
   if (spec.script === 'jpn') return out;
 
-  return withOcrSlot(async () => {
-    const opened = await openWorker(spec.tesseract, PSM.SINGLE_BLOCK);
-    if (!opened) return out;
-    const img = await loadImage(localPath);
+  const file = page ? cachePath(page.titleId, page.chapterId, page.pageNumber, `${spec.code}.refine`) : null;
+  const key = JSON.stringify(regions);
+  if (file && fs.existsSync(file)) {
     try {
+      const saved = JSON.parse(fs.readFileSync(file, 'utf8')) as { regions: string; texts: [number, string][] };
+      if (saved.regions === key) return new Map(saved.texts);
+    } catch {
+      /* corrupt entry: re-read below */
+    }
+  }
+
+  const reread = await withOcrSlot(async () => {
+    const img = await loadImage(localPath);
+    return useWorker(spec.tesseract, PSM.SINGLE_BLOCK, async (worker) => {
       for (const region of regions) {
         const sx = Math.max(0, Math.round(region.x0));
         const sy = Math.max(0, Math.round(region.y0));
@@ -194,15 +253,23 @@ export async function refineRegions(
         ctx.fillRect(0, 0, crop.width, crop.height);
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, crop.width, crop.height);
 
-        const { data } = await opened.worker.recognize(crop.toBuffer('image/png'));
+        const { data } = await worker.recognize(crop.toBuffer('image/png'));
         const text = (data.text ?? '').replace(/\s+/g, ' ').trim();
         if (text) out.set(region.id, text);
       }
-    } finally {
-      await opened.worker.terminate();
-    }
-    return out;
+      return out;
+    });
   });
+  if (!reread) return out;
+
+  if (file) {
+    try {
+      fs.writeFileSync(file, JSON.stringify({ regions: key, texts: [...reread] }));
+    } catch {
+      /* cache is best-effort */
+    }
+  }
+  return reread;
 }
 
 function cachePath(titleId: string, chapterId: string, pageNumber: number, tag: string): string {

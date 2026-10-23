@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
-import type { ChapterView, DownloadStatus, TitleDetailResponse } from '../types';
+import { formatBytes, timeAgo } from '../format';
+import { chapterKey, summarizeReading } from '../reading';
+import type { ChapterView, DownloadStatus, TitleDetailResponse, Usage } from '../types';
 import Pagination from '../components/Pagination';
 
 const TARGET_LANGS = ['EN', 'FR', 'DE', 'ES', 'PT-BR', 'IT', 'NL', 'PL', 'RU', 'KO', 'JA', 'ZH-HANS', 'ZH-HANT', 'TR', 'ID'];
@@ -21,22 +23,144 @@ export default function TitleDetail() {
   const [chFilter, setChFilter] = useState('');
   const [chDesc, setChDesc] = useState(false);
   const [chPage, setChPage] = useState(1);
+  /** Bytes this title takes on disk; saved titles only. */
+  const [usage, setUsage] = useState<Usage | null>(null);
+  /** The source is being asked whether this title has anything new. */
+  const [checking, setChecking] = useState(false);
+  const [checkedAt, setCheckedAt] = useState<string | null>(null);
+  /** What the last manual check found, shown until the next one. */
+  const [checkNote, setCheckNote] = useState('');
 
   const refresh = useCallback(async () => {
     if (!id) return;
     try {
       const t = await api.title(id!);
       setData(t);
-      if (t.inLibrary) setDl(await api.downloadStatus(id!));
-      else setDl(null);
+      setCheckedAt(t.checkedAt ?? null);
+      if (t.inLibrary) {
+        setDl(await api.downloadStatus(id!));
+        api.titleUsage(id!).then(setUsage, () => {});
+      } else {
+        setDl(null);
+        setUsage(null);
+      }
     } catch (e) {
       setError((e as Error).message);
     }
   }, [id]);
 
+  async function removeFromLibrary() {
+    if (!id || !data) return;
+    const total = usage ? usage.pages + usage.translations + usage.ocr : null;
+    const deletes =
+      total === 0
+        ? 'This deletes what was recorded about reading it.'
+        : `This deletes ${total == null ? 'its' : formatBytes(total) + ' of'} downloaded pages and translations, and what was recorded about reading it.`;
+    const ok = window.confirm(`Remove "${data.title.title}" from the library?\n\n${deletes}`);
+    if (!ok) return;
+    try {
+      await api.removeTitle(id);
+      navigate('/library');
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function clearTranslations() {
+    if (!id || !usage) return;
+    const ok = window.confirm(
+      `Delete ${formatBytes(usage.translations)} of translated pages?\n\nThey are rebuilt the next time you read this title translated.`,
+    );
+    if (!ok) return;
+    try {
+      await api.clearTranslations(id);
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function deleteChapterFiles(c: ChapterView) {
+    if (!id) return;
+    const name = c.chapter ? `chapter ${c.chapter}` : 'this chapter';
+    if (!window.confirm(`Delete the downloaded pages of ${name}? You can download it again later.`)) return;
+    try {
+      await api.deleteChapterFiles(id, c.id);
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  /** Chapters that were new when the page opened; kept while it stays open. */
+  const [newIds, setNewIds] = useState<Set<string>>(new Set());
+  const seenFor = useRef<string | null>(null);
+
+  // Opening a saved title marks its chapters seen. The server reports what was
+  // new before that, and it is remembered here so later reloads -- the page
+  // polls during downloads -- do not wipe the markers.
+  useEffect(() => {
+    if (!id || !data?.inLibrary || seenFor.current === id) return;
+    seenFor.current = id;
+    setNewIds(new Set(data.chapters.items.filter((c) => c.isNew).map((c) => c.id)));
+    api.markSeen(id).catch(() => {});
+  }, [id, data]);
+
+  const openId = useRef(id);
+  openId.current = id;
+
+  /**
+   * Asks the source whether this title has anything new. Opening the page does
+   * it quietly; the Refresh button lists every chapter again and says what it
+   * found. Whatever turns up is added to the list, marked NEW, and counts as
+   * seen since it is on screen.
+   */
+  const lookForNew = useCallback(
+    async (full: boolean) => {
+      if (!id) return;
+      setChecking(true);
+      setCheckNote('');
+      try {
+        const result = await api.refreshTitle(id, full);
+        // The reader may have moved on to another title while this was running.
+        if (openId.current !== id) return;
+        setCheckedAt(result.checkedAt);
+        if (result.fresh.length > 0) {
+          setNewIds((known) => new Set([...known, ...result.fresh]));
+          api.markSeen(id).catch(() => {});
+        }
+        if (result.added > 0 || result.detailsChanged) await refresh();
+        if (full) {
+          const found = result.news > 0 ? `Found ${result.news} new chapter${result.news === 1 ? '' : 's'}.` : '';
+          // They sit next to the copy that was there, so the list grows without a new chapter.
+          const better =
+            result.upgrades > 0
+              ? `Added ${result.upgrades} better translation${result.upgrades === 1 ? '' : 's'} of chapters you already have; the language filters show them.`
+              : '';
+          setCheckNote([found, better].filter(Boolean).join(' ') || 'Already up to date.');
+        }
+      } catch (e) {
+        if (openId.current === id) setCheckNote(`Could not check for new chapters: ${(e as Error).message}`);
+      } finally {
+        if (openId.current === id) setChecking(false);
+      }
+    },
+    [id, refresh],
+  );
+
+  const checkedFor = useRef<string | null>(null);
+
+  // Opening a saved title asks its source whether anything is new, so the
+  // chapter list is current without pressing anything.
+  useEffect(() => {
+    if (!id || !data?.inLibrary || checkedFor.current === id) return;
+    checkedFor.current = id;
+    void lookForNew(false);
+  }, [id, data, lookForNew]);
 
   useEffect(() => {
     if (!polling || !id) return;
@@ -64,13 +188,6 @@ export default function TitleDetail() {
     await refresh();
   }
 
-  async function sync() {
-    if (!id) return;
-    setError('');
-    await api.importTitle(id!);
-    await refresh();
-  }
-
   async function downloadOne(chapterId: string) {
     if (!id) return;
     setError('');
@@ -90,6 +207,30 @@ export default function TitleDetail() {
     } catch (e) {
       setTrl((m) => ({ ...m, [chapterId]: { target, running: false, done: 0, total: 0, failed: 0, error: (e as Error).message } }));
     }
+  }
+
+  /** Marks a chapter read or unread, updating the row before the server answers. */
+  async function toggleRead(c: ChapterView) {
+    if (!id) return;
+    const finished = !c.read?.finished;
+    setData((d) =>
+      d && {
+        ...d,
+        chapters: {
+          ...d.chapters,
+          items: d.chapters.items.map((x) =>
+            x.id === c.id ? { ...x, read: { page: finished ? (x.read?.page ?? 0) : 0, pages: x.read?.pages ?? null, finished } } : x,
+          ),
+        },
+      },
+    );
+    try {
+      await api.markChapterRead(id, c.id, finished);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    // "Continue reading" may have moved on.
+    await refresh();
   }
 
   // Poll any in-flight chapter translations so progress and completion update live.
@@ -119,6 +260,18 @@ export default function TitleDetail() {
 
   const { title, chapters, progress, languages } = data;
   const pct = dl && dl.total > 0 ? Math.round((dl.downloaded / dl.total) * 100) : 0;
+
+  const reading = summarizeReading(chapters.items, progress?.chapter_id);
+  const continueWith = reading.next;
+  // In reading order, so the first is where the new chapters start. They sit at
+  // the far end of a long list, which is why they get a banner of their own.
+  const fresh = chapters.items.filter((c) => newIds.has(c.id));
+  const firstNew = fresh[0];
+  const freshCount = new Set(fresh.map(chapterKey)).size;
+  const ago = timeAgo(checkedAt);
+  const checkLine = checking
+    ? 'Checking for new chapters…'
+    : checkNote || (ago ? `Checked for new chapters ${ago}.` : '');
   const byLang = activeLang
     ? chapters.items.filter((c) => c.language === activeLang)
     : chapters.items;
@@ -178,8 +331,13 @@ export default function TitleDetail() {
                   : '⬇ Add & download all'}
             </button>
             {data.inLibrary ? (
-              <button className="btn" onClick={sync}>
-                ⟳ Sync metadata
+              <button
+                className="btn"
+                onClick={() => lookForNew(true)}
+                disabled={checking}
+                title="List every chapter of this title again, including better translations of chapters you have, and refresh its details"
+              >
+                {checking ? '⟳ Checking…' : '⟳ Refresh'}
               </button>
             ) : (
               <button className="btn" onClick={addToLibrary}>
@@ -187,20 +345,67 @@ export default function TitleDetail() {
               </button>
             )}
           </div>
+          {data.inLibrary && checkLine && (
+            <p className="hint" role="status" style={{ marginTop: 8, marginBottom: 0 }}>
+              {checkLine}
+            </p>
+          )}
+          {data.inLibrary && (
+            <div className="storage-row">
+              {usage && (
+                <span className="muted small">
+                  On disk: {formatBytes(usage.pages)} of pages
+                  {usage.translations > 0 ? ` · ${formatBytes(usage.translations)} of translations` : ''}
+                </span>
+              )}
+              {usage && usage.translations > 0 && (
+                <button className="btn small ghost" onClick={clearTranslations}>
+                  Clear translations
+                </button>
+              )}
+              <button className="btn small ghost danger" onClick={removeFromLibrary}>
+                Remove from library
+              </button>
+            </div>
+          )}
           {!data.inLibrary && (
             <p className="hint" style={{ marginTop: 8, marginBottom: 0 }}>
               Not in your library yet — downloading a chapter will add it automatically.
             </p>
           )}
-          {progress?.chapter_id && (
-            <Link to={`/library/${title.id}/read/${progress.chapter_id}`}>
+          {continueWith && (
+            <Link to={`/library/${title.id}/read/${continueWith.id}`}>
               <button className="btn" style={{ marginTop: 10 }}>
-                Continue reading
+                {reading.resuming ? 'Continue' : 'Next'}:{' '}
+                {continueWith.chapter ? `Ch. ${continueWith.chapter}` : 'One-shot'}
+                {reading.resuming && continueWith.read?.page ? ` · p. ${continueWith.read.page}` : ''}
               </button>
             </Link>
           )}
+          {reading.caughtUp && <p className="hint" style={{ marginTop: 10 }}>✓ All caught up</p>}
+          {reading.read > 0 && (
+            <p className="hint" style={{ marginTop: 6, marginBottom: 0 }}>
+              {reading.read} of {reading.total} chapters read
+            </p>
+          )}
         </div>
       </div>
+
+      {firstNew && (
+        <div className="notice new-banner">
+          <span>
+            <strong>
+              {freshCount} new chapter{freshCount === 1 ? '' : 's'}
+            </strong>{' '}
+            since you last looked
+          </span>
+          <Link to={`/library/${title.id}/read/${firstNew.id}`}>
+            <button className="btn small primary">
+              Read {firstNew.chapter ? `Ch. ${firstNew.chapter}` : 'it'}
+            </button>
+          </Link>
+        </div>
+      )}
 
       {dl && dl.total > 0 && (
         <div className="dl-bar">
@@ -268,18 +473,40 @@ export default function TitleDetail() {
         {visible.map((c) => {
           const st = trl[c.id];
           return (
-          <div key={c.id} className="chapter-row">
+          <div key={c.id} className={`chapter-row${c.read?.finished ? ' is-read' : ''}`}>
             <span className="chapter-num">{c.chapter ?? '•'}</span>
             <div className="chapter-title">
+              {newIds.has(c.id) && <span className="new-tag">NEW</span>}
               {c.title ?? (c.chapter ? `Chapter ${c.chapter}` : 'One-shot')}
               <div className="chapter-sub">
                 {c.pages ? `${c.pages} pages` : ''}
                 {c.scanlator ? ` · ${c.scanlator}` : ''}
                 {c.language ? ` · ${c.language}` : ''}
+                {c.read && !c.read.finished && c.read.page > 0
+                  ? ` · read to p. ${c.read.page}${c.read.pages ? `/${c.read.pages}` : ''}`
+                  : ''}
               </div>
             </div>
             <div className="chapter-actions">
+              <button
+                className="btn small ghost"
+                onClick={() => toggleRead(c)}
+                title={c.read?.finished ? 'Mark as unread' : 'Mark as read'}
+                aria-pressed={Boolean(c.read?.finished)}
+              >
+                {c.read?.finished ? '✓ Read' : 'Mark read'}
+              </button>
               {c.downloaded === 1 && <span className="badge-ok tag">✓ downloaded</span>}
+              {c.downloaded === 1 && data.inLibrary && (
+                <button
+                  className="btn small ghost"
+                  onClick={() => deleteChapterFiles(c)}
+                  title="Delete the downloaded pages"
+                  aria-label="Delete the downloaded pages"
+                >
+                  🗑
+                </button>
+              )}
               {c.downloaded === -1 && <span className="badge-failed tag">✗ failed</span>}
               {c.downloaded !== 1 && (
                 <button className="btn small" onClick={() => downloadOne(c.id)}>

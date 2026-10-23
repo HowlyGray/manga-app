@@ -124,6 +124,16 @@ export interface TranslateOptions {
 const measureCanvas = createCanvas(8, 8);
 const measureCtx = measureCanvas.getContext('2d');
 
+/**
+ * Lets other requests run between balloons. Fitting and erasing are plain
+ * JavaScript over the page's pixels; on a long webtoon page they add up to a
+ * couple of hundred milliseconds, which used to hold every other request --
+ * page images included -- until the whole page was done.
+ */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 function trlDir(titleId: string, chapterId: string): string {
   const dir = path.join(chapterDir(titleId, chapterId), '.trl');
   fs.mkdirSync(dir, { recursive: true });
@@ -180,42 +190,86 @@ function writeJson(file: string, value: unknown): void {
   }
 }
 
-/** Wraps `text` to `maxWidth` at the current font, per the target's script. */
-function wrapText(ctx: SKRSContext2D, text: string, maxWidth: number, script: Script): string[] {
-  const lines: string[] = [];
-  if (wrapsAnywhere(script)) {
-    let line = '';
-    for (const ch of Array.from(text)) {
-      if (line && ctx.measureText(line + ch).width > maxWidth) {
-        lines.push(line);
-        line = ch;
-      } else line += ch;
+/** Size text is measured at; widths at any other size are scaled from it. */
+const REFERENCE_SIZE = 100;
+
+/**
+ * Width of a string per pixel of font size, measured once and remembered.
+ *
+ * Glyph advances grow linearly with font size, so a word is measured once per
+ * block instead of once for every candidate size. Fitting used to call
+ * measureText ~2,700 times on a long webtoon page, blocking the event loop for
+ * about 200 ms per render.
+ */
+function unitWidths(family: string): (s: string) => number {
+  const cache = new Map<string, number>();
+  return (s) => {
+    let width = cache.get(s);
+    if (width === undefined) {
+      measureCtx.font = `bold ${REFERENCE_SIZE}px ${family}`;
+      width = measureCtx.measureText(s).width / REFERENCE_SIZE;
+      cache.set(s, width);
     }
-    if (line) lines.push(line);
-    return lines;
+    return width;
+  };
+}
+
+/**
+ * Wraps `text` to `maxWidth`, per the target's script. `width` gives a string's
+ * width at the size being tried; line widths are summed from words (or, for
+ * CJK, characters) rather than re-measured.
+ */
+function wrapText(
+  width: (s: string) => number,
+  text: string,
+  maxWidth: number,
+  script: Script,
+): { lines: string[]; widest: number } {
+  const lines: string[] = [];
+  let widest = 0;
+  let line = '';
+  let lineWidth = 0;
+  const flush = () => {
+    if (!line) return;
+    lines.push(line);
+    widest = Math.max(widest, lineWidth);
+    line = '';
+    lineWidth = 0;
+  };
+  /** Adds glyphs one at a time, breaking wherever the box is full. */
+  const addChars = (chars: string) => {
+    for (const ch of Array.from(chars)) {
+      const w = width(ch);
+      if (line && lineWidth + w > maxWidth) flush();
+      line += ch;
+      lineWidth += w;
+    }
+  };
+
+  if (wrapsAnywhere(script)) {
+    addChars(text);
+    flush();
+    return { lines, widest };
   }
 
+  const space = width(' ');
   for (const word of text.split(/\s+/).filter(Boolean)) {
-    const candidate = lines.length > 0 ? `${lines[lines.length - 1]} ${word}` : word;
-    if (lines.length > 0 && ctx.measureText(candidate).width <= maxWidth) {
-      lines[lines.length - 1] = candidate;
+    const w = width(word);
+    if (line && lineWidth + space + w <= maxWidth) {
+      line += ` ${word}`;
+      lineWidth += space + w;
       continue;
     }
+    flush();
     // A single word longer than the box has to be broken mid-word.
-    if (ctx.measureText(word).width > maxWidth && word.length > 1) {
-      let piece = '';
-      for (const ch of word) {
-        if (piece && ctx.measureText(piece + ch).width > maxWidth) {
-          lines.push(piece);
-          piece = ch;
-        } else piece += ch;
-      }
-      if (piece) lines.push(piece);
-      continue;
+    if (w > maxWidth && word.length > 1) addChars(word);
+    else {
+      line = word;
+      lineWidth = w;
     }
-    lines.push(word);
   }
-  return lines.length > 0 ? lines : [text];
+  flush();
+  return lines.length > 0 ? { lines, widest } : { lines: [text], widest: width(text) };
 }
 
 interface Layout {
@@ -246,19 +300,18 @@ function layoutText(
   // then splashes a two-word line across the whole panel.
   const sourceCap = Math.max(11, Math.round(sourceLineHeight * 1.5));
   const upper = Math.round(Math.min(46, sourceCap, Math.max(11, maxHeight * 0.8)));
+  const unit = unitWidths(family);
   const words = wrapsAnywhere(script) ? [] : text.split(/\s+/).filter(Boolean);
+  const longestWord = words.reduce((m, wd) => Math.max(m, unit(wd)), 0);
   let best: Layout = { fontSize: 9, lineHeight: 9 * lineFactor, lines: [text] };
 
   for (let size = upper; size >= 9; size--) {
-    measureCtx.font = `bold ${size}px ${family}`;
-    const lines = wrapText(measureCtx, text, maxWidth, script);
-    const widest = lines.reduce((m, l) => Math.max(m, measureCtx.measureText(l).width), 0);
+    const { lines, widest } = wrapText((s) => unit(s) * size, text, maxWidth, script);
     const height = lines.length * size * lineFactor;
     best = { fontSize: size, lineHeight: size * lineFactor, lines };
     if (height > maxHeight || widest > maxWidth) continue;
     // Prefer a smaller font over hyphen-less mid-word breaks ("geschlosse n").
-    const longest = words.reduce((m, wd) => Math.max(m, measureCtx.measureText(wd).width), 0);
-    if (longest > maxWidth) continue;
+    if (longestWord * size > maxWidth) continue;
     break;
   }
   return best;
@@ -365,7 +418,7 @@ async function refineBlockText(
   });
   if (regions.length === 0) return;
 
-  const reread = await refineRegions(opts.localPath, regions, sourceLang);
+  const reread = await refineRegions(opts.localPath, regions, sourceLang, opts);
   for (const [id, text] of reread) {
     if (isBetterRead(blocks[id].text, text)) blocks[id].text = text;
   }
@@ -446,6 +499,7 @@ async function analyze(
     const fit = fitBubble(raster, block, obstacles);
     fits.set(i, fit);
     claimed.push({ x0: fit.x0, y0: fit.y0, x1: fit.x1, y1: fit.y1 });
+    await yieldToEventLoop();
   }
 
   if (config.translate.refine) await refineBlockText(opts, blocks, fits, spec.code);
@@ -522,6 +576,44 @@ async function analyze(
   };
 }
 
+type Analysis = { overlay: PageOverlay; fits: Map<number, BubbleFit> };
+
+/** The analysis running for each page and target, shared by concurrent callers. */
+const running = new Map<string, { gen: number; task: Promise<Analysis> }>();
+/** The newest analysis started per page and target: only it may store its overlay. */
+const newest = new Map<string, number>();
+let generation = 0;
+
+/**
+ * Runs `analyze` at most once at a time per page and target, and stores the
+ * overlay it produces.
+ *
+ * The text layer, the clean page and a whole-chapter job can all ask for the
+ * same page together, and each used to run OCR and translation on its own --
+ * paying for the translation twice. A `fresh` run (after a correction) never
+ * joins one already going, since that one started before the fix, and an older
+ * run that finishes later never overwrites the newer overlay.
+ */
+function analyzeOnce(opts: TranslateOptions, cached: PageOverlay | null, fresh = false): Promise<Analysis> {
+  const key = `${opts.titleId}/${opts.chapterId}/${opts.pageNumber}/${opts.targetLang}`;
+  const current = running.get(key);
+  if (current && !fresh) return current.task;
+
+  const gen = ++generation;
+  newest.set(key, gen);
+  const task = analyze(opts, cached).then((result) => {
+    if (newest.get(key) === gen) writeJson(overlayPath(opts), result.overlay);
+    return result;
+  });
+  running.set(key, { gen, task });
+  const settle = () => {
+    if (running.get(key)?.gen === gen) running.delete(key);
+    if (newest.get(key) === gen) newest.delete(key);
+  };
+  task.then(settle, settle);
+  return task;
+}
+
 /**
  * Returns the overlay description for a page, running the pipeline on a miss.
  * This is what the reader draws as live HTML over the original scan.
@@ -530,15 +622,13 @@ export async function pageOverlay(
   opts: TranslateOptions,
   { refresh = false }: { refresh?: boolean } = {},
 ): Promise<PageOverlay> {
-  const file = overlayPath(opts);
-  const cached = readOverlay(file);
+  const cached = readOverlay(overlayPath(opts));
   // A correction has to be able to take effect without clearing the cache.
   if (cached && !refresh) return cached;
 
   // The cached overlay still goes in: passing nothing here re-translated every
   // bubble of the page after a one-bubble correction.
-  const { overlay } = await analyze(opts, cached);
-  writeJson(file, overlay);
+  const { overlay } = await analyzeOnce(opts, cached, refresh);
   // The flattened page still shows the old text; it is rebuilt on next request.
   if (refresh) fs.rmSync(imagePath(opts, 'baked'), { force: true });
   return overlay;
@@ -613,14 +703,14 @@ export async function renderPage(
   if (fs.existsSync(out)) {
     return { buffer: fs.readFileSync(out), mime: 'image/webp', fromCache: true, translated: true };
   }
-  const overlayFile = overlayPath(opts);
-  const cachedOverlay = readOverlay(overlayFile);
+  const cachedOverlay = readOverlay(overlayPath(opts));
 
   const ext = path.extname(opts.localPath).toLowerCase();
   const sourceMime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
 
-  const { overlay, fits } = await analyze(opts, cachedOverlay);
-  writeJson(overlayFile, overlay);
+  // Rendering needs the erase masks, which are not stored, so the page is
+  // analyzed again; with OCR, re-reads and translations cached that is cheap.
+  const { overlay, fits } = await analyzeOnce(opts, cachedOverlay);
 
   if (!overlay.translated) {
     return {
@@ -645,6 +735,7 @@ export async function renderPage(
     if (fit?.inBubble) {
       eraseInto(raster, fit);
       erased = true;
+      await yieldToEventLoop();
     }
   }
   if (erased) ctx.putImageData(imageData, 0, 0);

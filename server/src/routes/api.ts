@@ -18,7 +18,19 @@ import {
 } from '../services/corrections';
 import { decodeId, getProvider, isLibraryId } from '../sources';
 import { downloadChapter } from '../downloader';
-import { getChapterTranslateStatus, startChapterTranslate } from '../services/chapterTranslate';
+import {
+  getChapterTranslateStatus,
+  startChapterTranslate,
+  translatingChapters,
+} from '../services/chapterTranslate';
+import {
+  clearTranslations,
+  libraryUsage,
+  removeChapterFiles,
+  removeTitle,
+  titleUsage,
+} from '../services/storage';
+import { startUpdateCheck, updateCheckStatus } from '../services/updates';
 
 export const apiRouter = Router();
 
@@ -196,6 +208,118 @@ apiRouter.get('/library', (_req, res) => {
   res.json(lib.listLibrary());
 });
 
+// Library-wide check for new chapters. Registered before `/library/:id`, which
+// would otherwise take `check-updates` for a title id. The web app sends
+// `?stale=1` when it opens, which leaves out titles checked recently; the
+// button on the library page checks every title.
+apiRouter.post('/library/check-updates', (req, res) => {
+  const stale = req.query.stale === '1' || req.query.stale === 'true';
+  res.json(startUpdateCheck(stale ? { olderThanMs: config.updates.staleMs } : {}));
+});
+
+apiRouter.get('/library/check-updates', (_req, res) => {
+  res.json(
+    updateCheckStatus() ?? {
+      running: false,
+      total: 0,
+      checked: 0,
+      found: 0,
+      failed: [],
+      startedAt: null,
+      finishedAt: null,
+    },
+  );
+});
+
+/** The title has been looked at: its chapters stop counting as new. */
+apiRouter.post('/library/:id/seen', (req, res) => {
+  lib.markSeen(req.params.id);
+  res.json({ ok: true });
+});
+
+/**
+ * Looks for new chapters and changed details of one saved title. Opening a
+ * title page asks for this, and is answered from the last check when that was
+ * recent; `?full=1` -- the Refresh button -- lists every chapter again.
+ */
+apiRouter.post('/library/:id/refresh', async (req, res) => {
+  const { id } = req.params;
+  if (!lib.getTitle(id)) return res.status(404).json({ error: 'not in the library' });
+  const full = req.query.full === '1' || req.query.full === 'true';
+
+  const checkedAt = lib.getChecked(id);
+  if (!full && checkedAt && Date.now() - checkedAt.getTime() < config.updates.titleFreshMs) {
+    return res.json({
+      refreshed: false,
+      added: 0,
+      upgrades: 0,
+      fresh: [],
+      news: 0,
+      detailsChanged: false,
+      incremental: true,
+      checkedAt: checkedAt.toISOString(),
+    });
+  }
+  try {
+    const result = await ingest.refreshTitle(id, { full });
+    res.json({ refreshed: true, ...result, checkedAt: lib.getChecked(id)?.toISOString() ?? null });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[refresh ${id}] FAILED: ${message}`);
+    res.status(502).json({ error: message });
+  }
+});
+
+/** Disk use of every saved title. Registered before `/library/:id` for the same reason. */
+apiRouter.get('/library/usage', async (_req, res) => {
+  res.json(await libraryUsage());
+});
+
+apiRouter.get('/library/:id/usage', async (req, res) => {
+  res.json(await titleUsage(req.params.id));
+});
+
+/**
+ * Why files of a title (or of one of its chapters) cannot be deleted right
+ * now, or null when nothing is using them.
+ */
+function busyWith(titleId: string, chapterId?: string): string | null {
+  if (runningTitleDownloads.has(titleId)) return 'the title is downloading';
+  const ids = chapterId ? [chapterId] : lib.listChapters(titleId).map((c) => c.id);
+  if (ids.some((c) => runningChapterDownloads.has(c))) return 'a chapter is downloading';
+  const translating = translatingChapters(titleId);
+  if (ids.some((c) => translating.has(c))) return 'a chapter is being translated';
+  return null;
+}
+
+/** Removes a title from the library, with its pages and caches. */
+apiRouter.delete('/library/:id', async (req, res) => {
+  const { id } = req.params;
+  if (!lib.getTitle(id)) return res.status(404).json({ error: 'not in the library' });
+  const busy = busyWith(id);
+  if (busy) return res.status(409).json({ error: `${busy}; try again once it has finished` });
+  res.json({ freed: await removeTitle(id) });
+});
+
+/** Deletes a chapter's downloaded pages; the chapter stays in the list. */
+apiRouter.delete('/library/:id/chapters/:chapterId/files', async (req, res) => {
+  const { id, chapterId } = req.params;
+  if (!lib.getChapter(id, chapterId)) return res.status(404).json({ error: 'chapter not in the library' });
+  const busy = busyWith(id, chapterId);
+  if (busy) return res.status(409).json({ error: `${busy}; try again once it has finished` });
+  res.json({ freed: await removeChapterFiles(id, chapterId) });
+});
+
+/** Deletes a title's translated renders; they are rebuilt when next read. */
+apiRouter.delete('/library/:id/translations', async (req, res) => {
+  const { id } = req.params;
+  if (!lib.getTitle(id)) return res.status(404).json({ error: 'not in the library' });
+  if (translatingChapters(id).size > 0) {
+    return res.status(409).json({ error: 'a chapter is being translated; try again once it has finished' });
+  }
+  res.json({ freed: await clearTranslations(id) });
+});
+
 apiRouter.get('/library/:id', async (req, res) => {
   const { id } = req.params;
   const title = lib.getTitle(id);
@@ -206,6 +330,8 @@ apiRouter.get('/library/:id', async (req, res) => {
       // `?refresh=1` skips the cache for this one read.
       const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
       const remote = await ingest.remoteTitleDetail(id, { refresh });
+      // Reading is remembered per chapter, so previewed titles have it too.
+      const reads = lib.readsFor(id);
       return res.json({
         inLibrary: false,
         coverUrl: `/api/cover/${encodeURIComponent(id)}`,
@@ -238,9 +364,10 @@ apiRouter.get('/library/:id', async (req, res) => {
             publishedAt: c.publishedAt,
             downloaded: 0,
             downloadError: null,
+            read: reads.get(c.id) ?? null,
           })),
         },
-        progress: null,
+        progress: lib.getProgress(id),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -248,6 +375,10 @@ apiRouter.get('/library/:id', async (req, res) => {
     }
   }
 
+  const reads = lib.readsFor(id);
+  // Worked out before the title page marks the title seen, so it can still
+  // point out what is new.
+  const fresh = lib.newChapterIds(id);
   const chapters = lib.listChapters(id, 'asc').map((c) => ({
     id: c.id,
     chapter: c.chapter_number,
@@ -259,10 +390,13 @@ apiRouter.get('/library/:id', async (req, res) => {
     publishedAt: c.published_at,
     downloaded: c.downloaded,
     downloadError: c.download_error,
+    read: reads.get(c.id) ?? null,
+    isNew: fresh.has(c.id),
   }));
   const progress = lib.getProgress(id);
   res.json({
     inLibrary: true,
+    checkedAt: lib.getChecked(id)?.toISOString() ?? null,
     coverUrl: `/api/cover/${encodeURIComponent(id)}`,
     title: {
       id: title.id,
@@ -690,13 +824,28 @@ apiRouter.get('/progress/:titleId', (req, res) => {
   res.json(p ?? { title_id: titleId, chapter_id: null, page: 0, mode: 'scroll' });
 });
 
+/**
+ * Records the page being read. Chapters read in preview count too: reads are
+ * kept per chapter, not tied to the library. `pages` lets the server mark the
+ * chapter finished when the last one is reached.
+ */
 apiRouter.post('/progress', (req, res) => {
-  const { titleId, chapterId, page = 0, mode = 'scroll' } = req.body ?? {};
+  const { titleId, chapterId, page = 0, mode = 'scroll', pages } = req.body ?? {};
   if (!isLibraryId(titleId) || !isLibraryId(chapterId)) {
     return res.status(400).json({ error: 'titleId and chapterId required' });
   }
-  if (!lib.getChapter(titleId, chapterId)) return res.status(404).json({ error: 'chapter not found' });
-  lib.setProgress(titleId, chapterId, Number(page ?? 0), mode === 'page' ? 'page' : 'scroll');
+  const at = Math.max(0, Math.floor(Number(page) || 0));
+  const count = Number.isInteger(pages) && pages > 0 ? (pages as number) : null;
+  lib.setProgress(titleId, chapterId, at, mode === 'page' ? 'page' : 'scroll', count);
+  res.json({ ok: true });
+});
+
+/** Marks a chapter read or unread by hand, from the chapter list. */
+apiRouter.post('/library/:id/chapters/:chapterId/read', (req, res) => {
+  const { id, chapterId } = req.params;
+  const finished = req.body?.finished;
+  if (typeof finished !== 'boolean') return res.status(400).json({ error: 'finished must be true or false' });
+  lib.setChapterFinished(id, chapterId, finished);
   res.json({ ok: true });
 });
 

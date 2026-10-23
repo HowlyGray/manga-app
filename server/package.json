@@ -10,7 +10,8 @@
     "start": "tsx src/index.ts",
     "start:lan": "tsx src/index.ts --lan",
     "sync": "tsx src/cli/sync.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.0",
@@ -25,6 +26,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^24.1.0",
     "tsx": "^4.23.13",
-    "typescript": "~5.9.3"
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.2"
   }
 }

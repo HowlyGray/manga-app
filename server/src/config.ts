@@ -36,6 +36,18 @@ export const config = {
     // Page URLs of a previewed chapter; MangaDex's expire, so keep it short.
     pagesMs: Number(process.env.CACHE_PAGES_MS ?? 10 * 60_000),
   },
+  updates: {
+    // The server looks for new chapters itself: shortly after it starts, every
+    // `intervalMs` while it runs, and whenever the web app is opened. Saved
+    // titles are only looked at again once their last check is `staleMs` old.
+    // `AUTO_UPDATE=0` leaves it to the buttons.
+    enabled: (process.env.AUTO_UPDATE ?? '1') !== '0',
+    staleMs: Number(process.env.UPDATE_STALE_MS ?? 3 * 3600_000),
+    intervalMs: Number(process.env.UPDATE_INTERVAL_MS ?? 30 * 60_000),
+    startDelayMs: Number(process.env.UPDATE_START_MS ?? 5_000),
+    // Opening a title page checks that title unless it was checked this recently.
+    titleFreshMs: Number(process.env.UPDATE_TITLE_MS ?? 5 * 60_000),
+  },
   weebcentral: {
     // Secondary source, used mostly for series MangaDex no longer carries.
     enabled: (process.env.WEEBCENTRAL ?? '1') !== '0',

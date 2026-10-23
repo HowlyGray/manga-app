@@ -196,6 +196,30 @@ a {
   font-size: 0.8rem;
 }
 
+/* A quiet button that only shows its frame on hover. */
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.btn.ghost:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.btn.ghost[aria-pressed='true'] {
+  color: var(--accent);
+}
+
+.btn.danger {
+  color: #ef4444;
+}
+
+.btn.danger:hover {
+  border-color: #ef4444;
+}
+
 /* ---- cards ---- */
 
 .grid {
@@ -327,6 +351,16 @@ a {
 
 .badge-failed {
   background: rgba(239, 68, 68, 0.9);
+}
+
+/* Second badge on a cover, above the first. */
+.card-badge.upper {
+  bottom: auto;
+  top: 8px;
+}
+
+.badge-new {
+  background: rgba(91, 140, 255, 0.92);
 }
 
 /* ---- loading skeletons ---- */
@@ -474,6 +508,33 @@ a {
 
 .chapter-row:hover {
   background: var(--bg-soft);
+}
+
+.storage-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.new-tag {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  vertical-align: 2px;
+}
+
+/* Finished chapters step back so the next unread one stands out. */
+.chapter-row.is-read .chapter-num,
+.chapter-row.is-read .chapter-title {
+  opacity: 0.5;
 }
 
 .chapter-num {
@@ -1062,9 +1123,25 @@ a.chip {
 /* ---- small screens ---- */
 
 @media (max-width: 640px) {
+  /*
+   * Brand, three links, the check status and the theme toggle came to 450px and
+   * pushed the toggle off a 375px screen. The emoji is the brand on a phone.
+   */
   .topbar-inner {
-    gap: 12px;
+    gap: 8px;
     padding: 10px 14px;
+  }
+
+  .brand-text {
+    display: none;
+  }
+
+  .nav {
+    gap: 0;
+  }
+
+  .nav a {
+    padding: 6px 10px;
   }
 
   .content {
@@ -1111,6 +1188,58 @@ a.chip {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+/* ---- new chapters ---- */
+
+/* The top bar's word on the check for new chapters. */
+.update-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.update-chip .spinner {
+  width: 12px;
+  height: 12px;
+  margin-right: 0;
+  border-width: 2px;
+}
+
+.update-chip.found {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Where the new chapters start, since they sit at the far end of the list. */
+.notice.new-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 12px 16px;
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--text);
+  text-align: left;
+}
+
+@media (max-width: 640px) {
+  /* Just the count on a phone: the nav already fills the bar. */
+  .update-chip-label {
+    display: none;
+  }
 }
 
 /* ---- unreliable readings and corrections ---- */

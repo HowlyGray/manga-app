@@ -8,7 +8,8 @@
     "dev:lan": "vite --host",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "react": "^19.2.8",
@@ -16,10 +17,14 @@
     "react-router-dom": "^7.18.3"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "jsdom": "^29.1.1",
     "typescript": "~5.9.3",
-    "vite": "^8.2.2"
+    "vite": "^8.2.2",
+    "vitest": "^5.0.2"
   }
 }
